@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Build/typecheck caches
+*.tsbuildinfo
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+
+# Note: lib/ is intentionally committed so end users install with zero build.

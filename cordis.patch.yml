@@ -1,0 +1,14 @@
+# dsh-agy bundle patch: mounts the plugin into a profile layer stack.
+# The row id is the key users can override in their profile's cordis.patch.yml;
+# the row name is this package's name and must stay equal to it.
+# Keep the two different: DSH prints the id and the module name on separate
+# lines in the plugin card, so an id equal to the module name renders the same
+# string twice (official bundles keep them distinct too).
+- insert:
+    - id: antigravity
+      name: 'dsh-agy'
+
+# This plugin owns Google Antigravity OAuth binding, the multi-account pool,
+# account rotation, the Cloud Code Assist inference route, and the Antigravity
+# tools (quota / stats / search). It does not touch search-provider settings,
+# agent defaults, or any other provider's routes.
