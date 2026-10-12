@@ -21,6 +21,7 @@ import { AccountManager } from './manager.ts'
 import { PROVIDER, fetchAvailableModels, maintainedModels } from './models.ts'
 import { registerRpc } from './rpc.ts'
 import { EngineStats } from './stats.ts'
+import { Diagnostics } from './diagnostics.ts'
 import { registerTools } from './tools.ts'
 import { createSelfUpdater, DEFAULT_UPDATE_INTERVAL_MS } from './self-update.ts'
 
@@ -142,6 +143,8 @@ export function apply(ctx: DshContext, rawConfig: Config): void {
     clientConfigRef: config.oauthClientConfigRef,
   })
   const stats = new EngineStats()
+  const diagnostics = new Diagnostics(updater.status().runningVersion)
+  manager.reportLog = (entry) => diagnostics.record(entry)
   manager.reportDiagnostic = (diagnostic) => stats.diagnostic(diagnostic)
   const reportSuccess = manager.reportSuccess.bind(manager)
   manager.reportSuccess = (accountId) => {
@@ -211,7 +214,7 @@ export function apply(ctx: DshContext, rawConfig: Config): void {
 
   // Register RPC once the web server and connection gate are available.
   ctx.inject(['connection', 'webServer'], (webCtx) => {
-    const dispose = registerRpc(webCtx.webServer, webCtx.connection, manager, { refreshModels: refresh, stats, updater })
+    const dispose = registerRpc(webCtx.webServer, webCtx.connection, manager, { refreshModels: refresh, stats, updater, diagnostics })
     webCtx.effect(() => dispose, 'dsh-agy: rpc')
   })
 }

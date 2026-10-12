@@ -94,6 +94,16 @@ En la ficha del plugin puedes conectar otra cuenta, activar una cuenta, eliminar
 
 Ejemplos: «Consulta la cuota de Antigravity» o «Busca la documentación oficial de TypeScript y cita las fuentes». DSH decide la exposición según la política y modo de herramientas del agente. El plugin **no cambia tu agente predeterminado ni sustituye automáticamente `web_search`**; búsqueda y generación pueden consumir cuota.
 
+### Logs de diagnóstico
+
+En **Plugins → Google Antigravity**, activa **Activar logs de diagnóstico**, reproduce el problema y pulsa **Copiar logs**. El panel se actualiza cada tres segundos mientras el registro esté activado y la página esté abierta. **Limpiar** vacía el historial; **Actualizar** permite consultarlo manualmente incluso con el registro apagado.
+
+El informe contiene hora, `requestId`, modelo, cantidad de herramientas, estados HTTP, reintentos/rotaciones, duración, etapa del fallo y `finishReason`. Los errores de conversión incluyen herramienta y ubicación del esquema. No contiene tokens, cabeceras, prompts, argumentos, respuestas ni `finishMessage`. Los nombres de herramientas y campos del esquema pueden ser propios de tu proyecto: revisa el informe antes de compartirlo.
+
+El registro está desactivado por defecto y guarda como máximo **200 entradas en memoria**. Apagarlo detiene la captura sin borrar el historial. La preferencia se guarda en `diagnostics-config.json` dentro del directorio de estado del plugin (`DSH_HOME/dsh-agy`, o `~/.dsh/dsh-agy`); las entradas nunca se guardan en disco y se pierden al recargar el plugin. Las estadísticas de **Consultar actividad** funcionan independientemente del switch.
+
+Si el navegador no permite copiar, el panel selecciona el informe para copiarlo manualmente. Tras instalar los cambios, reinicia completamente DSH.
+
 ### Actualización y reinstalación
 
 **Actualizar modelos** actualiza el catálogo, no el código del plugin. Para la actualización automática configurable del paquete, consulta [configuración y límites de seguridad](docs/SELF_UPDATE.md). No configura por sí sola un origen de publicación confiable ni implica que ya exista una versión descargable.
@@ -130,7 +140,7 @@ dsh plugin --profile web remove dsh-agy
 | Callback `51121` ocupado | Cancela otros intentos de autorización antes de reintentar. |
 | Cuenta revocada | Elimínala del plugin y vuelve a autorizarla. |
 | Faltan modelos | Comprueba la conexión y pulsa Actualizar modelos; revisa acceso de la cuenta y red. |
-| `PI_AI_ERROR` | Reproduce el fallo y abre Consultar actividad; comparte «Último fallo», modelo y pasos mínimos. |
+| `PI_AI_ERROR` | Activa los logs de diagnóstico, reproduce el fallo y pulsa Copiar logs; incluye modelo y pasos mínimos. Consultar actividad también muestra el último fallo. |
 | Texto funciona, herramientas fallan | Comprueba que instalaste los bundles más recientes y reproduce una llamada de herramientas. |
 | Tras actualizar sigue igual | Verifica carpeta instalada, bundles regenerados y reinicio de DSH. |
 

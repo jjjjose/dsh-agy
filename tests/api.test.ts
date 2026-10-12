@@ -122,7 +122,7 @@ describe('buildEnvelope', () => {
 })
 
 describe('tool transport', () => {
-  const provider = () => ({ afterRateLimit: vi.fn(), reportRateLimit: vi.fn(), reportSuccess: vi.fn(), reportError: vi.fn(), reportDiagnostic: vi.fn() })
+  const provider = () => ({ afterRateLimit: vi.fn(), reportRateLimit: vi.fn(), reportSuccess: vi.fn(), reportError: vi.fn(), reportDiagnostic: vi.fn(), reportLog: vi.fn() })
   const mockResponse = (frames: unknown[]): void => {
     const encoded = new TextEncoder().encode(frames.map((frame) => `data: ${JSON.stringify({ response: frame })}\n\n`).join('') + 'data: [DONE]\n\n')
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new ReadableStream({ start(controller) { controller.enqueue(encoded); controller.close() } }), { status: 200 })))
@@ -136,6 +136,25 @@ describe('tool transport', () => {
     expect(message.errorMessage).toContain('Tool bad_tool: Unsupported tool schema at #/properties/input')
     expect(fetcher).not.toHaveBeenCalled()
     expect(auth.reportDiagnostic).toHaveBeenCalledWith({ model: model.id, kind: 'request-conversion-error', toolCount: 1 })
+    expect(auth.reportLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'schema-error', tool: 'bad_tool', schemaPath: '#/properties/input' }))
+  })
+
+  it('does not interrupt generation when the logging callback fails', async () => {
+    mockResponse([{ candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }] }])
+    const auth = provider()
+    auth.reportLog.mockImplementation(() => { throw new Error('logging unavailable') })
+    const message = await streamAntiGravity(model, { messages: [] }, { apiKey: JSON.stringify({ token: 'fake', projectId: 'p' }) }, auth).result()
+    expect(message.stopReason).toBe('stop')
+  })
+
+  it('logs aborts without reporting raw exceptions', async () => {
+    const controller = new AbortController()
+    controller.abort(new Error('private cancellation text'))
+    const auth = provider()
+    const message = await streamAntiGravity(model, { messages: [] }, { apiKey: JSON.stringify({ token: 'fake', projectId: 'p' }), signal: controller.signal }, auth).result()
+    expect(message.stopReason).toBe('aborted')
+    expect(auth.reportLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'request-aborted', durationMs: expect.any(Number) }))
+    expect(JSON.stringify(auth.reportLog.mock.calls)).not.toContain('private cancellation text')
   })
 
   it('retains text signatures supplied in a later SSE frame for Gemini history', async () => {
@@ -162,6 +181,10 @@ describe('tool transport', () => {
     expect(events.filter((type) => type === 'toolcall_end')).toHaveLength(2)
     expect(message.usage.totalTokens).toBe(30)
     expect(auth.reportSuccess).toHaveBeenCalledWith('a')
+    expect(auth.reportLog.mock.calls.map(([entry]) => entry.event)).toEqual(['request-start', 'http-response', 'generation-finish', 'request-complete'])
+    const requestId = auth.reportLog.mock.calls[0]![0].requestId
+    expect(auth.reportLog.mock.calls.every(([entry]) => entry.requestId === requestId)).toBe(true)
+    expect(JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string).requestId).toBe(requestId)
     const calls = message.content.filter((block) => block.type === 'toolCall')
     expect(calls[0]!.thoughtSignature).toBe('c2ln')
     const context: Context = { tools, messages: [message, ...calls.map((call) => ({ role: 'toolResult' as const, toolCallId: call.id, toolName: call.name, content: [{ type: 'text' as const, text: call.name === 'glob' ? 'src/api.ts' : '/repo' }], isError: false, timestamp: 0 }))] }
@@ -182,5 +205,8 @@ describe('tool transport', () => {
     expect(message.usage).toMatchObject({ input: 20, output: 5, totalTokens: 25 })
     expect(auth.reportDiagnostic).toHaveBeenCalledWith({ model: model.id, finishReason: 'MALFORMED_FUNCTION_CALL', kind: 'generation-finish-error', toolCount: 2 })
     expect(auth.reportSuccess).not.toHaveBeenCalled()
+    expect(auth.reportLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'generation-finish', finishReason: 'MALFORMED_FUNCTION_CALL' }))
+    expect(auth.reportLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'request-error', durationMs: expect.any(Number) }))
+    expect(JSON.stringify(auth.reportLog.mock.calls)).not.toContain('Invalid call')
   })
 })

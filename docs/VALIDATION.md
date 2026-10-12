@@ -29,6 +29,19 @@ npm run smoke
 
 No provocar límites agotando cuota: validar la rotación con respuestas simuladas. No incluir tokens, URLs completas de autorización/callback ni prompts privados en capturas o informes.
 
+## Logs de diagnóstico
+
+1. Verificar que el switch está apagado en una instalación sin preferencias guardadas.
+2. Activarlo, enviar un prompt y comprobar inicio, HTTP, finalización y duración bajo el mismo `requestId`.
+3. Reproducir un fallo o cancelar una generación; revisar motivo y etapa sin contenido privado.
+4. Pulsar **Copiar logs** y comprobar el informe y la confirmación. Si el portapapeles está bloqueado, copiar manualmente el texto seleccionado.
+5. Apagar el switch: conservar el historial, pero no añadir entradas al enviar otra solicitud.
+6. Limpiar el historial y verificar que continúa vacío con el registro apagado.
+7. Reiniciar DSH: conservar la preferencia de activación, pero no las entradas anteriores. El arranque puede añadir entradas nuevas si el registro estaba activado.
+8. Salir de la página: detener la consulta periódica del panel sin detener el registro del servidor.
+
+El switch solo controla la generación de logs del transporte de inferencia, no los logs generales del host ni las peticiones independientes de cuotas, búsqueda o OAuth. La última actividad estadística funciona siempre. El informe excluye `finishMessage`, que puede contener datos privados; herramienta y ubicación del esquema pueden revelar nombres propios del proyecto, por lo que debe revisarse antes de compartirlo.
+
 ## Limitaciones
 
 ### Regresión de `MALFORMED_FUNCTION_CALL`

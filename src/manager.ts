@@ -14,6 +14,7 @@ import { refreshAccountAccess } from './token.ts'
 import { HealthTracker, TokenBucket, isCoolingDown, isRateLimited, selectAccount } from './rotation.ts'
 import { clearPool, loadPool, savePool } from './storage.ts'
 import type { RequestAuth } from './api.ts'
+import type { DiagnosticRecord } from './diagnostics-format.ts'
 import type { Account, LoginId, LoginStatus } from './types.ts'
 
 const RATE_LIMIT_WINDOW_MS = 30 * 60_000
@@ -317,6 +318,7 @@ export class AccountManager {
   }
 
   reportDiagnostic?: (diagnostic: { model: string; finishReason?: string; kind: string; toolCount?: number }) => void
+  reportLog?: (entry: DiagnosticRecord) => void
 
   /** Get a distinct account's auth after `accountId` was rate-limited. */
   async afterRateLimit(accountId: string): Promise<RequestAuth | undefined> {

@@ -17,10 +17,16 @@ export function resolveWireModel(id: string): { id: string; thinking?: Record<st
 
 const SCHEMA_KEYS = new Set(['type', 'description', 'properties', 'required', 'items', 'enum', 'nullable', 'anyOf', 'format', 'minimum', 'maximum', 'minItems', 'maxItems'])
 
+export class SchemaConversionError extends Error {
+  constructor(readonly schemaPath: string, reason: string) {
+    super(`Unsupported tool schema at ${schemaPath}: ${reason}`)
+  }
+}
+
 /** Remove unsupported JSON Schema keywords without interpreting property names as keywords. */
 export function cleanSchema(value: unknown, uppercase = false, root: unknown = value, path = '#', refs: string[] = [], allowNull = false): unknown {
   const child = (schema: unknown, location: string, unionBranch = false): unknown => cleanSchema(schema, uppercase, root, location, refs, unionBranch)
-  const fail = (message: string): never => { throw new Error(`Unsupported tool schema at ${path}: ${message}`) }
+  const fail = (message: string): never => { throw new SchemaConversionError(path, message) }
   if (value === false) return fail('false schemas cannot be represented')
   if (value === true) return {}
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return value

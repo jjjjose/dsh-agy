@@ -44,7 +44,7 @@ describe('Antigravity transport', () => {
     const fetcher = vi.fn().mockResolvedValueOnce(new Response('{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"retryDelay":"3s"}]}}', { status: 429 }))
       .mockResolvedValueOnce(new Response(`data: ${event}\r\n\r\ndata: [DONE]\r\n\r\n`))
     vi.stubGlobal('fetch', fetcher)
-    const provider = { reportRateLimit: vi.fn(), reportSuccess: vi.fn(), afterRateLimit: vi.fn().mockResolvedValue({ token: 'b', projectId: 'second', accountId: 'b' }) }
+    const provider = { reportRateLimit: vi.fn(), reportSuccess: vi.fn(), reportLog: vi.fn(), afterRateLimit: vi.fn().mockResolvedValue({ token: 'b', projectId: 'second', accountId: 'b' }) }
     const onPayload = vi.fn()
     const stream = streamAntiGravity(model, context, { apiKey: JSON.stringify({ token: 'a', projectId: 'first', accountId: 'a' }), onPayload }, provider)
     const result = await stream.result()
@@ -52,6 +52,9 @@ describe('Antigravity transport', () => {
     expect(provider.reportRateLimit).toHaveBeenCalledWith('a', 3000)
     expect(onPayload).toHaveBeenCalledTimes(2)
     expect(JSON.parse(fetcher.mock.calls[1]![1].body).project).toBe('second')
+    expect(provider.reportLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'http-response', status: 429, attempt: 1 }))
+    expect(provider.reportLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'account-rotation', attempt: 1 }))
+    expect(provider.reportLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'http-response', status: 200, attempt: 2 }))
   })
 
   it('does not rotate permission-denied accounts', async () => {

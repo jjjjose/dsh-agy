@@ -5,6 +5,9 @@
  */
 import * as React from 'react'
 import type { UpdateStatus } from '../self-update.ts'
+import { formatDiagnosticReport } from '../diagnostics-format.ts'
+import type { DiagnosticSnapshot } from '../diagnostics-format.ts'
+import { copyDiagnosticLogs, pollDiagnosticLogs } from './diagnostics.ts'
 
 interface SlotsService {
   inject(name: string, factory: () => unknown): () => void
@@ -32,7 +35,7 @@ type LoginStatus =
   | { kind: 'cancelled' }
 
 const PREFIX = '/_dsh/dsh-agy'
-const MUTATING = new Set(['login', 'logout', 'activate', 'cancel-login', 'refresh-models', 'update/check', 'update/install', 'update/config'])
+const MUTATING = new Set(['login', 'logout', 'activate', 'cancel-login', 'refresh-models', 'update/check', 'update/install', 'update/config', 'diagnostics/config', 'diagnostics/clear'])
 
 async function rpc<T>(method: string, args?: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   const query = !MUTATING.has(method) && args ? `?${new URLSearchParams(Object.entries(args).map(([key, value]) => [key, String(value)]))}` : ''
@@ -112,6 +115,12 @@ function installStyles(): void {
     .agy-error { color: var(--dsw-alias-state-error-primary, #d92d20); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .agy-note { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
     .agy-quota { width: 100%; margin: 0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dsw-alias-label-secondary); }
+    .agy-logs { width: 100%; min-height: 140px; max-height: 360px; resize: vertical; padding: 10px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 8px; background: transparent; color: var(--dsw-alias-label-secondary); font: 12px monospace; }
+    .agy-switch { appearance: none; width: 36px; height: 20px; border-radius: 10px; border: 1px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-interactive-bg-hover, #777); padding: 2px; cursor: pointer; }
+    .agy-switch::before { content: ''; display: block; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; }
+    .agy-switch[aria-checked="true"] { background: var(--dsw-alias-state-success-primary, #087f5b); }
+    .agy-switch[aria-checked="true"]::before { transform: translateX(16px); }
+    .agy-switch:disabled { opacity: .4; cursor: default; }
     @media (max-width: 600px) { .agy-row { align-items: flex-start; } .agy-controls { margin-left: 0; } }
   `
   document.head.appendChild(style)
@@ -362,9 +371,83 @@ function PackageUpdates(): React.ReactElement {
   </div>
 }
 
+function DiagnosticLogs(): React.ReactElement {
+  const [state, setState] = React.useState<DiagnosticSnapshot | null>(null)
+  const [error, setError] = React.useState('')
+  const [notice, setNotice] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const [revision, setRevision] = React.useState(0)
+  const lifetime = React.useRef<AbortController | null>(null)
+  const stopPolling = React.useRef<(() => void) | null>(null)
+  const report = React.useRef<HTMLTextAreaElement | null>(null)
+  const enabled = state?.enabled
+  React.useEffect(() => {
+    const controller = new AbortController()
+    lifetime.current = controller
+    return () => controller.abort()
+  }, [])
+  React.useEffect(() => {
+    const stop = pollDiagnosticLogs(
+      (signal) => rpc<DiagnosticSnapshot>('diagnostics', undefined, signal),
+      (result) => { setState(result); setError('') },
+      () => setError('No se pudieron consultar los logs. Reintenta o reinicia Harness si acabas de actualizar el plugin.'),
+      enabled ?? false,
+    )
+    stopPolling.current = stop
+    return stop
+  }, [enabled, revision])
+
+  const action = async (method: string, body: Record<string, unknown> = {}) => {
+    if (busy) return
+    stopPolling.current?.()
+    setBusy(true); setError(''); setNotice('')
+    try {
+      const result = await rpc<DiagnosticSnapshot>(method, body, lifetime.current?.signal)
+      if (!lifetime.current?.signal.aborted) {
+        setState(result)
+        setNotice(method === 'diagnostics/clear' ? 'Historial limpiado.' : result.enabled ? 'Registro activado. Reproduce el problema.' : 'Registro desactivado. El historial sigue disponible.')
+      }
+    } catch (error) {
+      if (!lifetime.current?.signal.aborted) setError(error instanceof Error ? error.message : 'No se pudo cambiar el registro.')
+    } finally {
+      if (!lifetime.current?.signal.aborted) { setBusy(false); setRevision((value) => value + 1) }
+    }
+  }
+  const copy = async () => {
+    if (!state || busy) return
+    setBusy(true); setError(''); setNotice('')
+    try {
+      await copyDiagnosticLogs(state, navigator.clipboard)
+      if (!lifetime.current?.signal.aborted) setNotice('Logs copiados.')
+    } catch (error) {
+      if (!lifetime.current?.signal.aborted) {
+        setError(error instanceof Error ? error.message : 'No se pudo copiar.')
+        report.current?.focus(); report.current?.select()
+      }
+    } finally { if (!lifetime.current?.signal.aborted) setBusy(false) }
+  }
+
+  return <div className="agy-page">
+    <Row title="Activar logs de diagnóstico" desc="Solo metadatos seguros. Máximo 200 entradas en memoria; la preferencia persiste, pero el historial se pierde al recargar." controls={<>
+      <span className="agy-note">{state ? state.enabled ? 'Activados' : 'Desactivados' : 'Consultando…'}</span>
+      <button type="button" className="agy-switch" role="switch" aria-label="Activar logs de diagnóstico" aria-checked={state?.enabled ?? false} disabled={!state || busy} onClick={() => { void action('diagnostics/config', { enabled: !state?.enabled }) }} />
+    </>} />
+    {state ? <>
+      <Row title={`Logs (${state.entries.length}/${state.limit})`} controls={<>
+        <Button disabled={busy} onClick={() => { void copy() }}>Copiar logs</Button>
+        <Button disabled={busy || !state.entries.length} onClick={() => { void action('diagnostics/clear') }}>Limpiar</Button>
+        <Button disabled={busy} onClick={() => setRevision((value) => value + 1)}>Actualizar</Button>
+      </>} />
+      <textarea className="agy-logs" aria-label="Informe de diagnóstico seguro" readOnly ref={report} value={formatDiagnosticReport(state)} />
+    </> : null}
+    {notice ? <p className="agy-note" role="status">{notice}</p> : null}
+    {error ? <><p className="agy-error" role="alert">{error}</p><Button disabled={busy} onClick={() => setRevision((value) => value + 1)}>Reintentar consulta</Button></> : null}
+  </div>
+}
+
 function BundleConfig(props: { view?: string }): React.ReactElement {
   if (props.view === 'summary') return <span>Conecta tu cuenta de Google para utilizar los modelos de Antigravity.</span>
-  return <><AntigravityPage /><PackageUpdates /></>
+  return <><AntigravityPage /><DiagnosticLogs /><PackageUpdates /></>
 }
 
 export const inject = ['slots']

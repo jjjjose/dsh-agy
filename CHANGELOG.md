@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Añadido
+
+- Switch de logs de diagnóstico seguro con preferencia persistente, historial en memoria de hasta 200 entradas, actualización periódica, copiado y limpieza desde la página del plugin.
+- Eventos correlacionados por solicitud: inicio, HTTP, red, reintentos, rotación, conversión de esquemas, finalización y cancelación; sin credenciales ni contenido de conversaciones.
+
 ### Corregido
 
 - Esquemas de herramientas: conservar alternativas de `oneOf` mediante `anyOf`, normalizar uniones anulables y resolver referencias locales antes de eliminar definiciones. La conversión no modifica el catálogo original.

@@ -14,6 +14,7 @@ import type { EngineStats } from './stats.ts'
 import { executeSearch } from './search.ts'
 import { UpdateInputError } from './self-update.ts'
 import type { SelfUpdater } from './self-update.ts'
+import type { Diagnostics } from './diagnostics.ts'
 
 export const ROUTE_PREFIX = '/_dsh/dsh-agy'
 const MAX_BODY_BYTES = 64 * 1024
@@ -65,7 +66,7 @@ export function registerRpc(
   webServer: WebServerService,
   connection: ConnectionService,
   manager: AccountManager,
-  options: { refreshModels?: () => void; stats?: EngineStats; updater?: SelfUpdater } = {},
+  options: { refreshModels?: () => void; stats?: EngineStats; updater?: SelfUpdater; diagnostics?: Diagnostics } = {},
 ): () => void {
   return webServer.register({
     kind: 'prefix',
@@ -86,6 +87,11 @@ export function registerRpc(
         const method = req.method ?? 'GET'
 
         if (method === 'GET') {
+          if (path === '/diagnostics') {
+            if (!options.diagnostics) { send(res, 503, { error: 'Diagnostic logs unavailable' }); return }
+            send(res, 200, options.diagnostics.snapshot())
+            return
+          }
           if (path === '/update/status') {
             if (!options.updater) { send(res, 503, { error: 'Self-updater unavailable' }); return }
             send(res, 200, options.updater.visitSettings())
@@ -123,6 +129,17 @@ export function registerRpc(
 
         if (method === 'POST') {
           const body = await readJsonBody(req)
+          if (path === '/diagnostics/config' || path === '/diagnostics/clear') {
+            if (!options.diagnostics) { send(res, 503, { error: 'Diagnostic logs unavailable' }); return }
+            if (path === '/diagnostics/config') {
+              if (typeof body.enabled !== 'boolean' || Object.keys(body).some((key) => key !== 'enabled')) throw new RpcInputError('enabled must be boolean; no other options are accepted')
+              send(res, 200, await options.diagnostics.configure(body.enabled))
+            } else {
+              if (Object.keys(body).length) throw new RpcInputError('clear does not accept options')
+              send(res, 200, options.diagnostics.clear())
+            }
+            return
+          }
           if (['/update/check', '/update/install', '/update/config'].includes(path)) {
             if (!options.updater) { send(res, 503, { error: 'Self-updater unavailable' }); return }
             options.updater.visitSettings()

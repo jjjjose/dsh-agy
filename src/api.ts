@@ -25,7 +25,8 @@ import type {
 import { convertMessages, isThinkingPart, mapStopReasonString, retainThoughtSignature } from '@earendil-works/pi-ai/api/google-shared'
 import { ENDPOINTS, antiGravityHeaders } from './constants.ts'
 import type { AntiGravityApi } from './models.ts'
-import { cleanContents, cleanSchema, readSse, resolveWireModel, responseFailure } from './transport-transform.ts'
+import { cleanContents, cleanSchema, readSse, resolveWireModel, responseFailure, SchemaConversionError } from './transport-transform.ts'
+import type { DiagnosticRecord } from './diagnostics-format.ts'
 
 /** Per-request auth handed to the transport, including the owning account. */
 export interface RequestAuth {
@@ -42,6 +43,16 @@ export interface AuthProvider {
   reportSuccess(accountId: string): void
   reportError?(accountId: string): void
   reportDiagnostic?(diagnostic: { model: string; finishReason?: string; kind: string; toolCount?: number }): void
+  reportLog?(entry: DiagnosticRecord): void
+}
+
+class ToolSchemaError extends Error {
+  constructor(readonly tool: string, readonly schemaPath: string | undefined, message: string) { super(message) }
+}
+
+/** Instrumentation must never interfere with inference. */
+function log(provider: AuthProvider, entry: DiagnosticRecord): void {
+  try { provider.reportLog?.(entry) } catch { /* Diagnostics are best-effort. */ }
 }
 
 interface ResponsePart {
@@ -126,7 +137,7 @@ export function buildEnvelope(
       try {
         return { name: tool.name, description: tool.description, parameters: normalizeToolSchema(tool.parameters, model.id.startsWith('claude-')) }
       } catch (error) {
-        throw new Error(`Tool ${tool.name}: ${error instanceof Error ? error.message : String(error)}`)
+        throw new ToolSchemaError(tool.name, error instanceof SchemaConversionError ? error.schemaPath : undefined, `Tool ${tool.name}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }) }]
   }
@@ -162,6 +173,7 @@ async function openResponse(
   options: StreamOptions,
   auth: RequestAuth,
   provider: AuthProvider,
+  requestId: string,
 ): Promise<{ response: Response; auth: RequestAuth }> {
   let current = auth
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -170,8 +182,11 @@ async function openResponse(
     try { payload = buildEnvelope(model, context, options, current.projectId) }
     catch (error) {
       provider.reportDiagnostic?.({ model: model.id, kind: 'request-conversion-error', toolCount: context.tools?.length ?? 0 })
+      log(provider, { requestId, model: model.id, event: 'schema-error',
+        ...error instanceof ToolSchemaError ? { tool: error.tool, schemaPath: error.schemaPath } : {} })
       throw error
     }
+    payload.requestId = requestId
     const replacement = await options.onPayload?.(payload, model)
     if (replacement != null) payload = replacement as Record<string, unknown>
     const body = JSON.stringify(payload)
@@ -192,9 +207,11 @@ async function openResponse(
         })
       } catch (error) {
         options.signal?.throwIfAborted()
+        log(provider, { requestId, model: model.id, event: 'network-error', attempt: attempt + 1 })
         failure = { message: error instanceof Error ? error.message : String(error), rateLimited: false }
         continue
       }
+      log(provider, { requestId, model: model.id, event: 'http-response', status: response.status, attempt: attempt + 1 })
       const headerRecord = Object.fromEntries(response.headers as unknown as Iterable<[string, string]>)
       try { await options.onResponse?.({ status: response.status, headers: headerRecord }, model) }
       catch (error) { await response.body?.cancel(); throw error }
@@ -203,12 +220,14 @@ async function openResponse(
       }
       failure = await responseFailure(response)
       if (failure.rateLimited || ![404, 500, 502, 503, 504].includes(response.status)) break
+      log(provider, { requestId, model: model.id, event: 'endpoint-retry', status: response.status, attempt: attempt + 1 })
     }
     // Rate-limited or retryable: rotate to the next account if available.
     if (current.accountId && failure?.rateLimited) {
       provider.reportRateLimit(current.accountId, failure.delay)
       const next = await provider.afterRateLimit(current.accountId)
       if (next) {
+        log(provider, { requestId, model: model.id, event: 'account-rotation', attempt: attempt + 1 })
         current = next
         continue
       }
@@ -245,12 +264,18 @@ export function streamAntiGravity(
   }
   void (async () => {
     let requestAccountId = ''
+    const requestId = `agent-${crypto.randomUUID()}`
+    const startedAt = Date.now()
+    let stage: DiagnosticRecord['stage'] = 'authentication'
+    log(provider, { requestId, model: model.id, event: 'request-start', toolCount: context.tools?.length ?? 0 })
     try {
       const auth = parseRequestAuth(options.apiKey)
       requestAccountId = auth.accountId
-      const opened = await openResponse(model, context, options, auth, provider)
+      stage = 'request'
+      const opened = await openResponse(model, context, options, auth, provider, requestId)
       requestAccountId = opened.auth.accountId
       const response = opened.response
+      stage = 'stream'
       if (response.body === null) throw new Error('Antigravity returned no response stream')
       let started = false
       let finishReason: string | undefined
@@ -344,8 +369,10 @@ export function streamAntiGravity(
         // reporting the terminal error to the harness.
         if (candidate?.finishReason !== undefined) {
           finishReason = candidate.finishReason
+          log(provider, { requestId, model: model.id, event: 'generation-finish', finishReason })
           output.stopReason = mapStopReasonString(candidate.finishReason)
           if (output.stopReason === 'error') {
+            stage = 'generation'
             provider.reportDiagnostic?.({ model: model.id, finishReason, kind: 'generation-finish-error', toolCount: context.tools?.length ?? 0 })
             // Expose the backend explanation in the request error, not persistent
             // activity diagnostics: it may contain generated arguments.
@@ -358,14 +385,17 @@ export function streamAntiGravity(
       for await (const text of readSse(response.body, options.signal)) consume(JSON.parse(text) as ResponseChunk)
       closeCurrent()
       if (output.content.length === 0 || output.content.every((block) => block.type === 'text' && !block.text.trim())) {
+        stage = 'empty-response'
         provider.reportDiagnostic?.({ model: model.id, finishReason, kind: 'empty-response' })
         throw new Error(`Antigravity returned an empty response (finishReason: ${finishReason ?? 'missing'})`)
       }
       const reason = output.stopReason === 'toolUse' || output.stopReason === 'length' ? output.stopReason : 'stop'
       stream.push({ type: 'done', reason, message: output })
+      log(provider, { requestId, model: model.id, event: 'request-complete', durationMs: Date.now() - startedAt })
       if (requestAccountId) provider.reportSuccess(requestAccountId)
       stream.end()
     } catch (error) {
+      log(provider, { requestId, model: model.id, event: options.signal?.aborted ? 'request-aborted' : 'request-error', durationMs: Date.now() - startedAt, stage })
       if (requestAccountId && !options.signal?.aborted) provider.reportError?.(requestAccountId)
       output.stopReason = options.signal?.aborted ? 'aborted' : 'error'
       output.errorMessage = error instanceof Error ? error.message : String(error)
