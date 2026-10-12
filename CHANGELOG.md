@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-10-12
+
 ### Añadido
 
 - Catálogo dinámico por cuenta/proyecto: descubre nuevas versiones compatibles, actualiza cada 15 minutos y conserva un respaldo normalizado en disco de hasta 24 horas ante errores de red.
