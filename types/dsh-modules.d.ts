@@ -63,6 +63,7 @@ declare module '@deepseek-ai/dsh-llm-pi-ai' {
     retryPolicy: unknown
     configuredMaxTokens: Map<string, number>
     piProvider: Provider<Api>
+    modelErrors: ReadonlyMap<string, string>
   }
   interface PiAiAdapterOptions {
     profiles: () => ReadonlyMap<string, ResolvedPiAiProviderProfile>
@@ -77,4 +78,18 @@ declare module '@deepseek-ai/dsh-llm-pi-ai' {
   export class PiAiAdapter {
     constructor(options: PiAiAdapterOptions)
   }
+}
+
+declare module '@deepseek-ai/dsh-tools' {
+  export interface ToolDefinition<Args, Value> {
+    name: string
+    description: string
+    parameters: Record<string, unknown>
+    output: {
+      schema: Record<string, unknown>
+      render(args: Args, value: Value): Array<{ type: 'text'; text: string }>
+    }
+    execute(args: Args, context: { signal: AbortSignal }): Promise<Value>
+  }
+  export function defineTool<Args, Value>(definition: ToolDefinition<Args, Value>): ToolDefinition<Args, Value>
 }

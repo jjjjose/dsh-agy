@@ -5,6 +5,7 @@
 
 import { ENDPOINTS, antiGravityHeaders } from './constants.ts'
 import type { Account, AccountQuotaResult, QuotaBucket } from './types.ts'
+import { responseFailure } from './transport-transform.ts'
 
 const FETCH_TIMEOUT_MS = 15_000
 
@@ -31,7 +32,7 @@ export function formatDuration(ms: number): string {
 }
 
 /** Fetch the dual-window quota summary for one access token. */
-async function fetchSummary(access: string, projectId: string): Promise<SummaryResponse> {
+async function fetchSummary(access: string, projectId: string, signal?: AbortSignal): Promise<SummaryResponse> {
   let lastError = ''
   for (const endpoint of ENDPOINTS) {
     try {
@@ -39,12 +40,13 @@ async function fetchSummary(access: string, projectId: string): Promise<SummaryR
         method: 'POST',
         headers: antiGravityHeaders(access),
         body: JSON.stringify({ project: projectId }),
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]) : AbortSignal.timeout(FETCH_TIMEOUT_MS),
       })
       if (response.ok) return (await response.json()) as SummaryResponse
-      lastError = `HTTP ${response.status}`
-      if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break
+      lastError = (await responseFailure(response)).message
+      if (![404, 500, 502, 503, 504].includes(response.status)) break
     } catch (error) {
+      signal?.throwIfAborted()
       lastError = error instanceof Error ? error.message : String(error)
     }
   }
@@ -52,10 +54,22 @@ async function fetchSummary(access: string, projectId: string): Promise<SummaryR
 }
 
 /** Collect quota buckets for one account. */
-export async function fetchAccountQuota(account: Account, access: string): Promise<AccountQuotaResult> {
+export async function fetchAccountQuota(account: Account, access: string, signal?: AbortSignal): Promise<AccountQuotaResult> {
   if (!account.enabled) return { accountId: account.id, email: account.email, status: 'disabled', buckets: [] }
   try {
-    const summary = await fetchSummary(access, account.projectId)
+    let summary: SummaryResponse
+    try {
+      summary = await fetchSummary(access, account.projectId, signal)
+    } catch {
+      signal?.throwIfAborted()
+      const response = await fetch(`${ENDPOINTS[0]}/v1internal:fetchAvailableModels`, {
+        method: 'POST', headers: antiGravityHeaders(access), body: JSON.stringify({ project: account.projectId }),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]) : AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      })
+      if (!response.ok) throw new Error((await responseFailure(response)).message)
+      const payload = await response.json() as { models?: Record<string, { displayName?: string; quotaInfo?: { remainingFraction?: number; resetTime?: string } }> }
+      summary = { groups: Object.entries(payload.models ?? {}).flatMap(([id, model]) => model.quotaInfo ? [{ displayName: model.displayName ?? id, buckets: [{ ...model.quotaInfo, window: 'model', bucketId: id }] }] : []) }
+    }
     const now = Date.now()
     const buckets: QuotaBucket[] = []
     for (const group of summary.groups ?? []) {
@@ -68,8 +82,8 @@ export async function fetchAccountQuota(account: Account, access: string): Promi
         }
         const timeUntilReset = Math.max(0, resetTime.getTime() - now)
         buckets.push({
-          window: bucket.window || bucket.bucketId || 'unknown',
-          label: bucket.displayName || bucket.bucketId || `${group.displayName ?? 'Limit'}`,
+          window: /weekly|week|7d/i.test(bucket.window || bucket.bucketId || '') ? 'weekly' : /5h|five.?hour/i.test(bucket.window || bucket.bucketId || '') ? '5h' : bucket.window || bucket.bucketId || 'unknown',
+          label: [group.displayName, bucket.displayName || bucket.bucketId].filter(Boolean).join(' — ') || 'Limit',
           remainingFraction: fraction,
           remainingPercentage: Math.round(fraction * 100),
           resetTime,
@@ -80,6 +94,7 @@ export async function fetchAccountQuota(account: Account, access: string): Promi
     }
     return { accountId: account.id, email: account.email, status: 'ok', buckets }
   } catch (error) {
+    signal?.throwIfAborted()
     return { accountId: account.id, email: account.email, status: 'error', error: error instanceof Error ? error.message : String(error), buckets: [] }
   }
 }

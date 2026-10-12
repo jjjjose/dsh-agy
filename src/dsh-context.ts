@@ -11,9 +11,11 @@
 
 import type { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 /** Registration handle returned by the LLM service; `replace` refreshes the catalog. */
 export interface LlmRegistration {
+  (): void
   replace(providers: string[]): void
 }
 
@@ -71,6 +73,7 @@ export interface WebRpcContext {
 
 /** The host context handed to `apply(ctx, config)`. */
 export interface DshContext {
+  tools: { register<Args, Value>(definition: ToolDefinition<Args, Value>): () => void }
   llm: LlmService
   credentials: CredentialProvider
   logger: DshLogger

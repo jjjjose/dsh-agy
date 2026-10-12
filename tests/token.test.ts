@@ -17,6 +17,23 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 describe('refreshAccountAccess', () => {
+  it('does not mistake client configuration errors for revocation', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(jsonResponse(400, { error: 'invalid_client' })))
+    expect((await refreshAccountAccess('test-refresh', clientConfig)).kind).toBe('error')
+  })
+
+  it('rejects malformed successful responses', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(jsonResponse(200, { expires_in: 3600 })))
+    expect((await refreshAccountAccess('test-refresh', clientConfig)).kind).toBe('error')
+  })
+
+  it('passes cancellation through to fetch', async () => {
+    const controller = new AbortController()
+    const fetch = vi.fn(() => Promise.resolve(jsonResponse(200, { access_token: 'test-access', expires_in: 3600 })))
+    vi.stubGlobal('fetch', fetch)
+    await refreshAccountAccess('test-refresh', clientConfig, controller.signal)
+    expect(fetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: controller.signal }))
+  })
   it('returns ok with a fresh access token and expiry margin', async () => {
     vi.stubGlobal('fetch', () => Promise.resolve(jsonResponse(200, {
       access_token: 'new-access',

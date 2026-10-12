@@ -10,12 +10,16 @@ import type { ConnectionService, HttpLikeRequest, HttpLikeResponse, WebServerSer
 import type { AccountManager } from './manager.ts'
 import type { AccountQuotaResult } from './types.ts'
 import { formatQuotaReport, fetchAccountQuota } from './quota.ts'
+import type { EngineStats } from './stats.ts'
+import { executeSearch } from './search.ts'
 
 export const ROUTE_PREFIX = '/_dsh/dsh-agy'
 const MAX_BODY_BYTES = 64 * 1024
 
+class RpcInputError extends Error {}
+
 function send(res: HttpLikeResponse, status: number, payload: unknown): void {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   res.end(JSON.stringify(payload))
 }
 
@@ -23,18 +27,22 @@ async function readJsonBody(req: HttpLikeRequest): Promise<Record<string, unknow
   const chunks: Buffer[] = []
   let size = 0
   const readable = req as unknown as NodeJS.ReadableStream & { on(event: 'data', cb: (c: Buffer) => void): void; on(event: 'end', cb: () => void): void }
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
+    readable.on('error', reject)
+    readable.on('aborted', () => reject(new Error('Request aborted')))
     readable.on('data', (chunk: Buffer) => {
       size += chunk.length
       if (size <= MAX_BODY_BYTES) chunks.push(chunk)
     })
     readable.on('end', () => resolve())
   })
-  if (size > MAX_BODY_BYTES) throw new Error('Request body too large')
+  if (size > MAX_BODY_BYTES) throw new RpcInputError('Request body too large')
   const text = Buffer.concat(chunks).toString('utf8')
   if (text.length === 0) return {}
-  const parsed = JSON.parse(text) as unknown
-  return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {}
+  let parsed: unknown
+  try { parsed = JSON.parse(text) } catch { throw new RpcInputError('Invalid JSON body') }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new RpcInputError('Expected a JSON object')
+  return parsed as Record<string, unknown>
 }
 
 function pathOf(req: HttpLikeRequest): { path: string; search: URLSearchParams } {
@@ -55,6 +63,7 @@ export function registerRpc(
   webServer: WebServerService,
   connection: ConnectionService,
   manager: AccountManager,
+  options: { refreshModels?: () => void; stats?: EngineStats } = {},
 ): () => void {
   return webServer.register({
     kind: 'prefix',
@@ -67,10 +76,18 @@ export function registerRpc(
         return
       }
       try {
+        if (!(req.url ?? '').split('?')[0]?.startsWith(`${ROUTE_PREFIX}/`)) {
+          send(res, 404, { error: 'not found' })
+          return
+        }
         const { path, search } = pathOf(req)
         const method = req.method ?? 'GET'
 
         if (method === 'GET') {
+          if (path === '/stats') {
+            send(res, 200, options.stats?.snapshot() ?? { accounts: [] })
+            return
+          }
           if (path === '/status') {
             send(res, 200, { accounts: await manager.list() })
             return
@@ -99,18 +116,45 @@ export function registerRpc(
 
         if (method === 'POST') {
           const body = await readJsonBody(req)
+          if (path === '/refresh-models') {
+            options.refreshModels?.()
+            send(res, 202, { ok: true })
+            return
+          }
+          if (path === '/search') {
+            if (typeof body.query !== 'string' || !body.query.trim() || body.query.length > 10000) {
+              send(res, 400, { error: 'A non-empty query of at most 10000 characters is required' })
+              return
+            }
+            if (body.urls !== undefined && (!Array.isArray(body.urls) || body.urls.length > 20 || !body.urls.every((url) => typeof url === 'string' && /^https?:\/\//i.test(url)))) {
+              send(res, 400, { error: 'urls must contain at most 20 HTTP(S) URLs' })
+              return
+            }
+            const auth = await manager.resolveAuth()
+            const report = await executeSearch({ query: body.query, urls: body.urls as string[] | undefined }, auth.token, auth.projectId)
+            send(res, 200, { report })
+            return
+          }
           if (path === '/login') {
             const start = await manager.startLogin()
             send(res, 200, start)
             return
           }
+          if (path === '/cancel-login') {
+            if (typeof body.loginId !== 'string' || !body.loginId) throw new RpcInputError('loginId is required')
+            manager.cancelLogin(body.loginId)
+            send(res, 200, { ok: true })
+            return
+          }
           if (path === '/logout') {
+            if (body.accountId !== undefined && (typeof body.accountId !== 'string' || !body.accountId)) throw new RpcInputError('Invalid accountId')
             const accountId = typeof body.accountId === 'string' ? body.accountId : undefined
             await manager.remove(accountId)
             send(res, 200, { ok: true })
             return
           }
           if (path === '/activate') {
+            if (typeof body.accountId !== 'string' || !body.accountId) throw new RpcInputError('accountId is required')
             const accountId = typeof body.accountId === 'string' ? body.accountId : ''
             const ok = await manager.setActive(accountId)
             send(res, ok ? 200 : 404, { ok })
@@ -122,7 +166,7 @@ export function registerRpc(
 
         send(res, 405, { error: 'method not allowed' })
       } catch (error) {
-        send(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        send(res, error instanceof RpcInputError ? 400 : 500, { error: error instanceof RpcInputError ? error.message : 'The operation failed. Check account status and try again.' })
       }
     },
   })

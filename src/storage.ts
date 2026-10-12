@@ -8,6 +8,7 @@
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import type { Account, AccountStorage, Fingerprint } from './types.ts'
 
 /** Directory that owns this plugin's state files. */
@@ -106,24 +107,29 @@ export async function loadPool(): Promise<AccountStorage> {
 
 /** Persist the pool atomically. */
 export function savePool(storage: AccountStorage): Promise<void> {
+  const content = JSON.stringify(storage, null, 2)
+  const target = poolPath()
+  const dir = stateDir()
   return withLock(async () => {
-    const dir = stateDir()
     await fs.mkdir(dir, { recursive: true })
-    const target = poolPath()
-    const tmp = `${target}.${Date.now().toString(36)}.tmp`
-    const content = JSON.stringify(storage, null, 2)
-    await fs.writeFile(tmp, content, { encoding: 'utf8', mode: 0o600 })
-    await fs.rename(tmp, target)
+    const tmp = `${target}.${randomUUID()}.tmp`
+    try {
+      await fs.writeFile(tmp, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+      await fs.rename(tmp, target)
+    } finally {
+      await fs.unlink(tmp).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error })
+    }
   })
 }
 
 /** Remove the pool file entirely (used by "disconnect all"). */
 export async function clearPool(): Promise<void> {
+  const target = poolPath()
   await withLock(async () => {
     try {
-      await fs.unlink(poolPath())
-    } catch {
-      // ignore missing file
+      await fs.unlink(target)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
   })
 }

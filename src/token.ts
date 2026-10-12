@@ -61,10 +61,12 @@ function parseOAuthError(text: string | undefined): { code?: string; description
 export async function refreshAccountAccess(
   refreshToken: string,
   clientConfig: OAuthClientConfig,
+  signal?: AbortSignal,
 ): Promise<RefreshResult> {
   let response: Response
   try {
     response = await fetch(TOKEN_URL, {
+      signal,
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -81,13 +83,23 @@ export async function refreshAccountAccess(
   if (!response.ok) {
     const text = await response.text().catch(() => undefined)
     const { code, description } = parseOAuthError(text)
-    if (code === 'invalid_grant' || response.status === 400 || response.status === 401) {
+    if (code === 'invalid_grant') {
       return { kind: 'revoked' }
     }
     return { kind: 'error', message: description ?? text ?? `HTTP ${response.status}`, status: response.status }
   }
 
-  const payload = (await response.json()) as TokenPayload
+  let payload: TokenPayload
+  try {
+    payload = (await response.json()) as TokenPayload
+    if (!payload || typeof payload.access_token !== 'string' || !payload.access_token
+      || !Number.isFinite(payload.expires_in) || payload.expires_in <= 0
+      || (payload.refresh_token !== undefined && (typeof payload.refresh_token !== 'string' || !payload.refresh_token))) {
+      return { kind: 'error', message: 'Invalid OAuth token response' }
+    }
+  } catch {
+    return { kind: 'error', message: 'Invalid OAuth token response' }
+  }
   return {
     kind: 'ok',
     access: payload.access_token,

@@ -40,7 +40,7 @@ export class HealthTracker {
   get(id: string, now = Date.now()): number {
     const state = this.states.get(id)
     if (!state) return this.config.initial
-    const hours = (now - state.updatedAt) / 3_600_000
+    const hours = Math.max(0, now - state.updatedAt) / 3_600_000
     return Math.min(this.config.max, state.score + Math.floor(hours * this.config.recoveryPerHour))
   }
 
@@ -64,6 +64,11 @@ export class HealthTracker {
   isUsable(id: string, now = Date.now()): boolean {
     return this.get(id, now) >= this.config.minUsable
   }
+
+  /** Forget failures after a fresh authorization. */
+  reset(id: string): void {
+    this.states.delete(id)
+  }
 }
 
 /** Client-side token bucket to smooth request bursts per account. */
@@ -78,7 +83,7 @@ export class TokenBucket {
   balance(id: string, now = Date.now()): number {
     const state = this.buckets.get(id)
     if (!state) return this.max
-    const minutes = (now - state.updatedAt) / 60_000
+    const minutes = Math.max(0, now - state.updatedAt) / 60_000
     return Math.min(this.max, state.tokens + minutes * this.regenPerMinute)
   }
 

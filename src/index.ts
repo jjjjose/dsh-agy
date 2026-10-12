@@ -20,9 +20,11 @@ import type { DshContext } from './dsh-context.ts'
 import { AccountManager } from './manager.ts'
 import { PROVIDER, fetchAvailableModels, maintainedModels } from './models.ts'
 import { registerRpc } from './rpc.ts'
+import { EngineStats } from './stats.ts'
+import { registerTools } from './tools.ts'
 
 export const name = 'dsh-agy'
-export const inject = ['llm', 'credentials']
+export const inject = ['llm', 'credentials', 'tools']
 
 const DEFAULT_OAUTH_CREDENTIAL_REF = 'GOOGLE_ANTIGRAVITY_OAUTH_CREDENTIAL'
 const DEFAULT_DISPLAY_NAME = 'Google Antigravity'
@@ -106,6 +108,7 @@ function profileFor(manager: AccountManager, config: ResolvedConfig, models: rea
     requestImageMaxBytes: config.requestImageMaxBytes,
     retryPolicy: resolveRetryPolicy(undefined, 'dsh-agy: retryPolicy'),
     configuredMaxTokens: new Map(),
+    modelErrors: new Map(),
     piProvider: providerFor(manager, config, models, oauth),
   }]])
 }
@@ -125,7 +128,23 @@ export function apply(ctx: DshContext, rawConfig: Config): void {
     credentialRef: credentialRef(config.oauthCredentialEnv),
     clientConfigRef: config.oauthClientConfigRef,
   })
-  void manager.init()
+  const stats = new EngineStats()
+  const reportSuccess = manager.reportSuccess.bind(manager)
+  manager.reportSuccess = (accountId) => {
+    stats.record(accountId, 'success')
+    reportSuccess(accountId)
+  }
+  const reportRateLimit = manager.reportRateLimit.bind(manager)
+  manager.reportRateLimit = (accountId, ...args) => {
+    stats.record(accountId, 'rateLimits')
+    reportRateLimit(accountId, ...args)
+  }
+  const reportError = manager.reportError.bind(manager)
+  manager.reportError = (accountId) => {
+    stats.record(accountId, 'errors')
+    reportError(accountId)
+  }
+  void manager.init().catch(() => ctx.logger.warn('dsh-agy: account storage could not be initialized'))
 
   let profiles = profileFor(manager, config, maintainedModels, oauth)
   const adapter = new PiAiAdapter({
@@ -135,6 +154,9 @@ export function apply(ctx: DshContext, rawConfig: Config): void {
     resolveAttachments: () => ctx.get('attachments'),
   })
   const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
+  ctx.effect(() => () => registration(), 'dsh-agy: provider registration')
+  ctx.effect(() => () => manager.dispose(), 'dsh-agy: account manager')
+  ctx.effect(() => registerTools(ctx.tools, manager, stats), 'dsh-agy: agent tools')
 
   // Live catalog reconciliation against fetchAvailableModels.
   const controller = new AbortController()
@@ -144,12 +166,13 @@ export function apply(ctx: DshContext, rawConfig: Config): void {
       try {
         const auth = await manager.resolveAuth()
         const live = await fetchAvailableModels(auth.token, auth.projectId, controller.signal)
+        controller.signal.throwIfAborted()
         profiles = profileFor(manager, config, live, oauth)
         registration.replace([PROVIDER])
       } catch (error) {
         if (!controller.signal.aborted) {
           ctx.logger.info('dsh-agy: live model refresh unavailable; keeping the maintained catalog')
-          ctx.logger.debug(error)
+          ctx.logger.debug('dsh-agy: catalog refresh failed')
         }
       } finally {
         refreshing = undefined
@@ -167,12 +190,20 @@ export function apply(ctx: DshContext, rawConfig: Config): void {
   ctx.on('credentials/reference-updated', ((ref: string) => {
     if (ref === config.oauthCredentialEnv) refresh()
   }) as never)
+  // RC hosts used the earlier event name; catalog refresh is deduplicated.
+  ctx.on('credentials/updated', ((ref: string) => {
+    if (ref === config.oauthCredentialEnv) refresh()
+  }) as never)
 
   // Register RPC once the web server and connection gate are available.
   ctx.inject(['connection', 'webServer'], (webCtx) => {
-    const dispose = registerRpc(webCtx.webServer, webCtx.connection, manager)
+    const dispose = registerRpc(webCtx.webServer, webCtx.connection, manager, { refreshModels: refresh, stats })
     webCtx.effect(() => dispose, 'dsh-agy: rpc')
   })
 }
 
 export { PROVIDER }
+
+// Match the package-plugin contract used by dsh-chatgpt-sub while preserving
+// named Cordis exports for hosts that load the namespace directly.
+export default { name, inject, Config, apply }

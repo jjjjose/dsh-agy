@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 import type { OAuthAuth, OAuthCredential } from '@earendil-works/pi-ai'
 import type { CredentialProvider, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { DEFAULT_OAUTH_CLIENT_CONFIG_REF, resolveOAuthClientConfig, type OAuthClientConfig } from './client-config.ts'
@@ -39,6 +40,8 @@ export interface ManagerOptions {
   credentials: CredentialProvider
   credentialRef: CredentialRef
   clientConfigRef?: string
+  /** Maximum wait for a short account cooldown; defaults to 1s, capped at 5s. */
+  maxWaitMs?: number
 }
 
 /** Interaction bridge reused from pi-ai's login contract. */
@@ -52,6 +55,10 @@ export class AccountManager {
   private accounts: Account[] = []
   private activeId?: string
   private loaded = false
+  private initialization?: Promise<void>
+  private disposed = false
+  private readonly lifetime = new AbortController()
+  private readonly refreshes = new Map<string, Promise<string>>()
   private readonly health = new HealthTracker()
   private readonly bucket = new TokenBucket()
   private attempt: LoginAttempt | undefined
@@ -60,11 +67,15 @@ export class AccountManager {
 
   /** Load the pool from disk (idempotent). */
   async init(): Promise<void> {
+    if (this.disposed) throw new Error('Antigravity manager was disposed')
     if (this.loaded) return
-    const pool = await loadPool()
-    this.accounts = pool.accounts
-    this.activeId = pool.activeId
-    this.loaded = true
+    this.initialization ??= loadPool().then((pool) => {
+      this.accounts = pool.accounts
+      this.activeId = pool.activeId
+      this.loaded = true
+    }).catch((error: unknown) => { this.initialization = undefined; throw error })
+    await this.initialization
+    if (this.disposed) throw new Error('Antigravity manager was disposed')
   }
 
   private async clientConfig(): Promise<OAuthClientConfig> {
@@ -122,10 +133,14 @@ export class AccountManager {
   /** Start one OAuth login; the browser opens `authorizationUrl`. */
   async startLogin(): Promise<{ loginId: LoginId; authorizationUrl: string }> {
     await this.init()
-    this.attempt?.controller.abort('A newer Antigravity login started')
+    this.cancelLogin()
     const attempt: LoginAttempt = { id: randomUUID(), controller: new AbortController(), status: { kind: 'pending' } }
     this.attempt = attempt
-    const url = Promise.withResolvers<string>()
+    let resolveUrl!: (value: string) => void
+    let rejectUrl!: (reason: unknown) => void
+    const promise = new Promise<string>((resolve, reject) => { resolveUrl = resolve; rejectUrl = reject })
+    const url = { resolve: resolveUrl, reject: rejectUrl, promise }
+    attempt.controller.signal.addEventListener('abort', () => url.reject(new Error('Antigravity OAuth was cancelled')), { once: true })
     const notify = (event: { type: string; url?: string }): void => {
       if (event.type === 'auth_url' && typeof event.url === 'string') url.resolve(event.url)
     }
@@ -135,8 +150,10 @@ export class AccountManager {
       prompt: (): Promise<string> => Promise.reject(new Error('Antigravity OAuth does not support interactive prompts')),
     }
     void this.options.oauth.login(piInteraction).then(async (credential) => {
+      url.reject(new Error('Antigravity OAuth completed without an authorization URL'))
       if (this.attempt !== attempt || attempt.controller.signal.aborted) return
       await this.addCredential(credential)
+      if (this.attempt !== attempt || attempt.controller.signal.aborted) return
       attempt.status = { kind: 'succeeded', email: (credential as OAuthCredential & { email?: string }).email }
     }).catch((error: unknown) => {
       if (attempt.controller.signal.aborted) {
@@ -157,10 +174,26 @@ export class AccountManager {
     return this.attempt.status
   }
 
+  /** Cancel the current login (or only the supplied matching attempt). */
+  cancelLogin(id?: LoginId): void {
+    if (!this.attempt || (id !== undefined && this.attempt.id !== id)) return
+    if (this.attempt.status.kind !== 'pending') return
+    this.attempt.status = { kind: 'cancelled' }
+    this.attempt.controller.abort()
+  }
+
+  /** Stop login and in-flight token refreshes; the manager cannot be reused. */
+  dispose(): void {
+    this.cancelLogin()
+    this.disposed = true
+    this.lifetime.abort()
+  }
+
   /** Remove one account, or all when `accountId` is undefined. */
   async remove(accountId?: string): Promise<void> {
     await this.init()
     if (accountId === undefined) {
+      this.cancelLogin()
       this.accounts = []
       this.activeId = undefined
       await clearPool()
@@ -178,7 +211,7 @@ export class AccountManager {
   async setActive(accountId: string): Promise<boolean> {
     await this.init()
     const account = this.accounts.find((a) => a.id === accountId)
-    if (!account) return false
+    if (!account || !account.enabled || isRateLimited(account) || isCoolingDown(account)) return false
     this.activeId = accountId
     await this.persist()
     await this.mirrorActive()
@@ -196,31 +229,58 @@ export class AccountManager {
 
     let chosenId = selectAccount({ accounts: pool, activeId: this.activeId, health: this.health, bucket: this.bucket, now })
     if (chosenId === undefined) {
-      // Everything is rate-limited or cooling down: fall back to the least
-      // recently rate-limited account so the request still proceeds.
-      chosenId = [...pool].sort((a, b) => (a.lastUsed - b.lastUsed))[0]?.id
+      const waits = pool.filter((a) => a.enabled && this.health.isUsable(a.id, now) && this.bucket.has(a.id, 1, now))
+        .map((a) => Math.max(a.coolingDownUntil ?? 0, ...Object.values(a.rateLimitedUntil ?? {})) - now)
+        .filter((wait) => wait > 0)
+      const wait = Math.min(...waits)
+      const configuredWait = this.options.maxWaitMs ?? 1000
+      const bound = Number.isFinite(configuredWait) ? Math.max(0, Math.min(configuredWait, 5000)) : 1000
+      if (wait <= bound) {
+        await delay(wait, undefined, { signal: this.lifetime.signal })
+        chosenId = selectAccount({ accounts: pool.filter((a) => this.accounts.includes(a)), activeId: this.activeId, health: this.health, bucket: this.bucket })
+      }
     }
     if (chosenId === undefined) throw new Error('No usable Antigravity account is available right now.')
     const account = this.accounts.find((a) => a.id === chosenId)
     if (!account) throw new Error('Antigravity account selection failed.')
 
     const access = await this.ensureAccess(account)
+    if (!account.enabled || !this.accounts.includes(account) || isRateLimited(account) || isCoolingDown(account) || this.disposed) {
+      throw new Error('Antigravity account is no longer available')
+    }
     account.lastUsed = Date.now()
-    this.bucket.consume(account.id)
+    if (!this.bucket.consume(account.id)) throw new Error('Antigravity account request budget was exhausted')
     await this.persist()
     return { token: access, projectId: account.projectId, accountId: account.id }
   }
 
   /** Ensure the account has a valid access token, refreshing when expired. */
   private async ensureAccess(account: Account): Promise<string> {
+    if (this.disposed || !account.enabled || !this.accounts.includes(account)) throw new Error('Antigravity account is unavailable')
     if (account.accessToken && (account.accessExpires ?? 0) > Date.now() + 30_000) {
       return account.accessToken
     }
+    const pending = this.refreshes.get(account.id)
+    if (pending) return pending
+    const operation = this.refreshAccess(account).finally(() => { this.refreshes.delete(account.id) })
+    this.refreshes.set(account.id, operation)
+    return operation
+  }
+
+  private async refreshAccess(account: Account): Promise<string> {
+    const refreshToken = account.refreshToken
+    const previousAccess = account.accessToken
     const config = await this.clientConfig()
-    const result = await refreshAccountAccess(account.refreshToken, config)
+    this.lifetime.signal.throwIfAborted()
+    const result = await refreshAccountAccess(refreshToken, config, this.lifetime.signal)
+    this.lifetime.signal.throwIfAborted()
+    if (!this.accounts.includes(account) || account.refreshToken !== refreshToken || account.accessToken !== previousAccess) throw new Error('Antigravity account changed during refresh')
     if (result.kind === 'revoked') {
       account.enabled = false
+      delete account.accessToken
+      delete account.accessExpires
       await this.persist()
+      if (this.activeId === account.id) await this.options.credentials.unset(this.options.credentialRef)
       throw new Error(`Antigravity account ${account.email ?? account.id.slice(0, 8)} was revoked; sign in again.`)
     }
     if (result.kind === 'error') {
@@ -238,17 +298,22 @@ export class AccountManager {
 
   // ---- AuthProvider (rotation hooks used by api.ts) ----------------------
 
-  reportRateLimit(accountId: string): void {
+  reportRateLimit(accountId: string, delayMs?: number): void {
     const account = this.accounts.find((a) => a.id === accountId)
     if (account) {
-      account.rateLimitedUntil = { ...(account.rateLimitedUntil ?? {}), all: Date.now() + RATE_LIMIT_WINDOW_MS }
-      void this.persist()
+      const delay = delayMs !== undefined && Number.isFinite(delayMs) && delayMs >= 0 ? Math.min(delayMs, 86_400_000) : RATE_LIMIT_WINDOW_MS
+      account.rateLimitedUntil = { ...(account.rateLimitedUntil ?? {}), all: Math.max(account.rateLimitedUntil?.all ?? 0, Date.now() + delay) }
+      void this.persist().catch(() => { /* Best effort; subsequent operations persist this state. */ })
     }
     this.health.rateLimited(accountId)
   }
 
   reportSuccess(accountId: string): void {
     this.health.success(accountId)
+  }
+
+  reportError(accountId: string): void {
+    this.health.failure(accountId)
   }
 
   /** Get a distinct account's auth after `accountId` was rate-limited. */
@@ -281,6 +346,9 @@ export class AccountManager {
       existing.accessToken = credential.access
       existing.accessExpires = credential.expires
       existing.enabled = true
+      this.health.reset(existing.id)
+      delete existing.rateLimitedUntil
+      delete existing.coolingDownUntil
       this.activeId = existing.id
     } else {
       const account: Account = {
@@ -304,7 +372,10 @@ export class AccountManager {
   /** Keep the Harness credential store in sync with the active account. */
   private async mirrorActive(): Promise<void> {
     const account = this.accounts.find((a) => a.id === this.activeId)
-    if (!account) return
+    if (!account || !account.enabled) {
+      await this.options.credentials.unset(this.options.credentialRef)
+      return
+    }
     const mirror: OAuthCredential = {
       type: 'oauth',
       access: account.accessToken ?? '',

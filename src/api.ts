@@ -25,6 +25,7 @@ import type {
 import { convertMessages, convertTools, isThinkingPart, mapStopReasonString, retainThoughtSignature } from '@earendil-works/pi-ai/api/google-shared'
 import { ENDPOINTS, antiGravityHeaders } from './constants.ts'
 import type { AntiGravityApi } from './models.ts'
+import { cleanContents, cleanSchema, readSse, resolveWireModel, responseFailure } from './transport-transform.ts'
 
 /** Per-request auth handed to the transport, including the owning account. */
 export interface RequestAuth {
@@ -37,11 +38,10 @@ export interface RequestAuth {
 export interface AuthProvider {
   /** Next distinct auth after `accountId` was rate-limited, if any. */
   afterRateLimit(accountId: string): Promise<RequestAuth | undefined>
-  reportRateLimit(accountId: string): void
+  reportRateLimit(accountId: string, delay?: number): void
   reportSuccess(accountId: string): void
+  reportError?(accountId: string): void
 }
-
-const RETRYABLE = [403, 404, 429, 500, 502, 503, 504]
 
 interface ResponsePart {
   text?: string
@@ -50,6 +50,7 @@ interface ResponsePart {
   functionCall?: { id?: string; name?: string; args?: Record<string, unknown> }
 }
 interface ResponseChunk {
+  error?: { message?: string; status?: string }
   response?: {
     responseId?: string
     candidates?: Array<{ content?: { parts?: ResponsePart[] }; finishReason?: string }>
@@ -89,23 +90,46 @@ export function buildEnvelope(
   projectId: string,
 ): Record<string, unknown> {
   const googleModel = model as unknown as Model<'google-generative-ai'>
+  const history: PiContext = {
+    ...context,
+    messages: context.messages.map((message) => message.role === 'assistant'
+      ? { ...message, content: message.content.filter((part) => part.type !== 'thinking' || (!model.id.startsWith('claude-') && message.model === model.id && message.provider === model.provider)) }
+      : message),
+  }
   const request: Record<string, unknown> = {
-    contents: convertMessages(googleModel, context),
+    contents: cleanContents(convertMessages(googleModel, history), model.id.startsWith('claude-')),
     ...options.sessionId === undefined ? {} : { sessionId: options.sessionId },
   }
   if (context.systemPrompt !== undefined) {
     request.systemInstruction = { role: 'user', parts: [{ text: context.systemPrompt }] }
   }
   const generationConfig: Record<string, unknown> = {}
+  const wire = resolveWireModel(model.id)
+  if (wire.thinking) generationConfig.thinkingConfig = wire.thinking
+  const reasoning = (options as SimpleStreamOptions).reasoning
+  if (model.id.includes('claude-') && model.id.includes('thinking') && reasoning !== undefined) {
+    const budgets: Record<string, number> = { off: 0, minimal: 1024, low: 8192, medium: 16384, high: 32768, xhigh: 32768, max: 32768 }
+    const custom = (options as SimpleStreamOptions).thinkingBudgets
+    const budget = (custom as Record<string, number> | undefined)?.[reasoning] ?? budgets[reasoning] ?? 16384
+    generationConfig.thinkingConfig = { includeThoughts: budget > 0, thinkingBudget: Math.min(budget, Math.max(0, (options.maxTokens ?? model.maxTokens) - 1)) }
+  }
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
   if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = options.maxTokens
   if (Object.keys(generationConfig).length > 0) request.generationConfig = generationConfig
   if (context.tools !== undefined && context.tools.length > 0) {
     request.tools = convertTools(context.tools, model.id.startsWith('claude-'))
+    request.tools = (request.tools as Array<{ functionDeclarations?: Array<Record<string, unknown>> }>).map((tool) => ({
+      ...tool,
+      functionDeclarations: tool.functionDeclarations?.map((declaration) => ({
+        ...declaration,
+        ...declaration.parameters === undefined ? {} : { parameters: cleanSchema(declaration.parameters) },
+        ...declaration.parametersJsonSchema === undefined ? {} : { parametersJsonSchema: cleanSchema(declaration.parametersJsonSchema) },
+      })),
+    }))
   }
   return {
     project: projectId,
-    model: model.id,
+    model: wire.id,
     request,
     requestType: 'agent',
     userAgent: 'antigravity',
@@ -121,46 +145,52 @@ async function openResponse(
   auth: RequestAuth,
   provider: AuthProvider,
 ): Promise<{ response: Response; auth: RequestAuth }> {
-  let payload = buildEnvelope(model, context, options, auth.projectId)
-  const replacement = await options.onPayload?.(payload, model)
-  if (replacement != null) payload = replacement as Record<string, unknown>
-  const body = JSON.stringify(payload)
-
   let current = auth
   for (let attempt = 0; attempt < 3; attempt++) {
-    let lastStatus: number | undefined
+    options.signal?.throwIfAborted()
+    let payload = buildEnvelope(model, context, options, current.projectId)
+    const replacement = await options.onPayload?.(payload, model)
+    if (replacement != null) payload = replacement as Record<string, unknown>
+    const body = JSON.stringify(payload)
+    let failure: Awaited<ReturnType<typeof responseFailure>> | undefined
     for (const endpoint of ENDPOINTS) {
       const headers = {
         ...Object.fromEntries(Object.entries(options.headers ?? {}).filter((e): e is [string, string] => e[1] !== null)),
         ...antiGravityHeaders(current.token),
+        .../^gemini-3\.[78]-flash/.test(model.id) ? { 'User-Agent': 'antigravity/cli/1.2.7 (aidev_client; os_type=linux; arch=amd64; cl=962369648; auth_method=consumer)' } : {},
         accept: 'text/event-stream',
         ...model.id.startsWith('claude-') ? { 'anthropic-beta': 'interleaved-thinking-2025-05-14' } : {},
       }
-      const response = await fetch(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-        method: 'POST',
-        headers,
-        body,
-        ...options.signal === undefined ? {} : { signal: options.signal },
-      })
+      let response: Response
+      try {
+        response = await fetch(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+          method: 'POST', headers, body,
+          ...options.signal === undefined ? {} : { signal: options.signal },
+        })
+      } catch (error) {
+        options.signal?.throwIfAborted()
+        failure = { message: error instanceof Error ? error.message : String(error), rateLimited: false }
+        continue
+      }
       const headerRecord = Object.fromEntries(response.headers as unknown as Iterable<[string, string]>)
-      await options.onResponse?.({ status: response.status, headers: headerRecord }, model)
+      try { await options.onResponse?.({ status: response.status, headers: headerRecord }, model) }
+      catch (error) { await response.body?.cancel(); throw error }
       if (response.ok) {
-        if (current.accountId) provider.reportSuccess(current.accountId)
         return { response, auth: current }
       }
-      lastStatus = response.status
-      if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break
+      failure = await responseFailure(response)
+      if (failure.rateLimited || ![404, 500, 502, 503, 504].includes(response.status)) break
     }
     // Rate-limited or retryable: rotate to the next account if available.
-    if (current.accountId && (lastStatus === 429 || lastStatus === 403)) {
-      provider.reportRateLimit(current.accountId)
+    if (current.accountId && failure?.rateLimited) {
+      provider.reportRateLimit(current.accountId, failure.delay)
       const next = await provider.afterRateLimit(current.accountId)
       if (next) {
         current = next
         continue
       }
     }
-    throw new Error(`Antigravity inference failed with HTTP ${lastStatus ?? 'unknown'}`)
+    throw new Error(`Antigravity inference failed with ${failure?.message ?? 'unknown error'}`)
   }
   throw new Error('Antigravity inference failed after exhausting retries')
 }
@@ -191,14 +221,14 @@ export function streamAntiGravity(
     timestamp: Date.now(),
   }
   void (async () => {
+    let requestAccountId = ''
     try {
       const auth = parseRequestAuth(options.apiKey)
+      requestAccountId = auth.accountId
       const opened = await openResponse(model, context, options, auth, provider)
+      requestAccountId = opened.auth.accountId
       const response = opened.response
       if (response.body === null) throw new Error('Antigravity returned no response stream')
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
       let started = false
       let current: TextContent | ThinkingContent | undefined
       const ensureStarted = (): void => {
@@ -214,11 +244,15 @@ export function streamAntiGravity(
         current = undefined
       }
       const consume = (chunk: ResponseChunk): void => {
+        if (chunk.error) throw new Error(chunk.error.message ?? chunk.error.status ?? 'Antigravity stream error')
         const data = chunk.response
         if (data === undefined) return
         if (output.responseId === undefined && data.responseId !== undefined) output.responseId = data.responseId
         const candidate = data.candidates?.[0]
         for (const part of candidate?.content?.parts ?? []) {
+          if (part.text === undefined && part.thoughtSignature !== undefined && current?.type === 'thinking') {
+            current.thinkingSignature = part.thoughtSignature
+          }
           if (part.text !== undefined) {
             const thinking = isThinkingPart(part)
             let active = current
@@ -280,25 +314,15 @@ export function streamAntiGravity(
           calculateCost(model, output.usage)
         }
       }
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-        for (const line of lines) {
-          if (!line.startsWith('data:')) continue
-          const text = line.slice(5).trim()
-          if (text.length === 0) continue
-          consume(JSON.parse(text) as ResponseChunk)
-        }
-      }
+      for await (const text of readSse(response.body, options.signal)) consume(JSON.parse(text) as ResponseChunk)
       closeCurrent()
       if (output.content.length === 0) throw new Error('Antigravity returned an empty response')
       const reason = output.stopReason === 'toolUse' || output.stopReason === 'length' ? output.stopReason : 'stop'
       stream.push({ type: 'done', reason, message: output })
+      if (requestAccountId) provider.reportSuccess(requestAccountId)
       stream.end()
     } catch (error) {
+      if (requestAccountId && !options.signal?.aborted) provider.reportError?.(requestAccountId)
       output.stopReason = options.signal?.aborted ? 'aborted' : 'error'
       output.errorMessage = error instanceof Error ? error.message : String(error)
       stream.push({ type: 'error', reason: output.stopReason, error: output })

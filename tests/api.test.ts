@@ -54,6 +54,6 @@ describe('buildEnvelope', () => {
     const context = { messages: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'hi' }] }] }
     const envelope = buildEnvelope(model, context, { temperature: 0.4, maxTokens: 128 }, 'p')
     const request = envelope.request as Record<string, unknown>
-    expect(request.generationConfig).toEqual({ temperature: 0.4, maxOutputTokens: 128 })
+    expect(request.generationConfig).toEqual({ temperature: 0.4, maxOutputTokens: 128, thinkingConfig: { includeThoughts: true, thinkingLevel: 'high' } })
   })
 })

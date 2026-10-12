@@ -52,6 +52,22 @@ describe('sanitizeAccount', () => {
 })
 
 describe('loadPool / savePool / clearPool', () => {
+  it('snapshots queued writes before caller mutation', async () => {
+    const storage = { version: 1 as const, accounts: [sampleAccount('snapshot')] }
+    const pending = savePool(storage)
+    storage.accounts[0]!.refreshToken = 'mutated'
+    await pending
+    expect((await loadPool()).accounts[0]?.refreshToken).toBe('r-snapshot')
+  })
+
+  it('orders concurrent saves and clear operations', async () => {
+    await Promise.all([
+      savePool({ version: 1, accounts: [sampleAccount('first')] }),
+      clearPool(),
+      savePool({ version: 1, accounts: [sampleAccount('last')] }),
+    ])
+    expect((await loadPool()).accounts.map((a) => a.id)).toEqual(['last'])
+  })
   it('returns an empty pool when the file is missing', async () => {
     const pool = await loadPool()
     expect(pool).toEqual({ version: 1, accounts: [] })

@@ -76,10 +76,15 @@ async function exchange(params: URLSearchParams, signal?: AbortSignal): Promise<
     ...signal === undefined ? {} : { signal },
   })
   if (!response.ok) {
-    const text = await response.text().catch(() => '')
-    throw new Error(`Antigravity token exchange failed with HTTP ${response.status}${text ? `: ${text}` : ''}`)
+    throw new Error(`Antigravity token exchange failed with HTTP ${response.status}`)
   }
-  return response.json() as Promise<TokenResponse>
+  const tokens = await response.json() as TokenResponse
+  if (!tokens || typeof tokens.access_token !== 'string' || !tokens.access_token
+    || !Number.isFinite(tokens.expires_in) || tokens.expires_in <= 0
+    || (tokens.refresh_token !== undefined && (typeof tokens.refresh_token !== 'string' || !tokens.refresh_token))) {
+    throw new Error('Invalid Antigravity OAuth token response')
+  }
+  return tokens
 }
 
 async function fetchEmail(access: string, signal?: AbortSignal): Promise<string | undefined> {
@@ -115,7 +120,23 @@ async function login(
   const challenge = base64Url(createHash('sha256').update(verifier).digest())
   const state = base64Url(randomBytes(24))
 
+  const auth = new URL(AUTHORIZE_URL)
+  auth.search = new URLSearchParams({
+    client_id: clientConfig.clientId, response_type: 'code', redirect_uri: REDIRECT_URI,
+    scope: ANTIGRAVITY_SCOPES.join(' '), code_challenge: challenge,
+    code_challenge_method: 'S256', state, access_type: 'offline', prompt: 'consent',
+  }).toString()
+  interaction.signal?.throwIfAborted()
   const code = await new Promise<string>((resolve, reject) => {
+    let settled = false
+    const cleanup = (): void => {
+      settled = true
+      clearTimeout(timeout)
+      interaction.signal?.removeEventListener('abort', abort)
+      server.close()
+    }
+    const abort = (): void => { cleanup(); reject(new Error('Antigravity OAuth was cancelled')) }
+    const timeout = setTimeout(() => { cleanup(); reject(new Error('Antigravity OAuth timed out')) }, 300_000)
     const server = createServer((request, response) => {
       const url = new URL(request.url ?? '/', REDIRECT_URI)
       if (url.pathname !== OAUTH_CALLBACK_PATH) {
@@ -123,42 +144,33 @@ async function login(
         return
       }
       const receivedCode = url.searchParams.get('code')
-      if (url.searchParams.get('state') !== state || receivedCode === null) {
+      if (url.searchParams.get('state') === state && url.searchParams.has('error')) {
+        response.writeHead(400).end('Antigravity authorization was declined.')
+        cleanup()
+        reject(new Error('Antigravity authorization was declined'))
+        return
+      }
+      if (url.searchParams.get('state') !== state || !receivedCode) {
         response.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }).end('Antigravity OAuth callback is invalid.')
-        server.close()
-        reject(new Error('Antigravity OAuth state or code is invalid'))
         return
       }
       response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }).end('Antigravity login completed. You may close this page.')
-      server.close()
+      cleanup()
       resolve(receivedCode)
     })
     server.on('error', (error) => {
+      cleanup()
       reject(new Error(`Could not start the Antigravity OAuth callback on port ${OAUTH_CALLBACK_PORT}: ${error.message}. Close other Antigravity sessions and retry.`))
     })
-    server.listen(OAUTH_CALLBACK_PORT, '127.0.0.1')
-    interaction.signal?.addEventListener('abort', () => {
-      server.close()
-      reject(new Error('Antigravity OAuth was cancelled'))
-    }, { once: true })
+    server.listen(OAUTH_CALLBACK_PORT, '127.0.0.1', () => {
+      if (settled) { server.close(); return }
+      try {
+        interaction.notify({ type: 'auth_url', url: auth.toString(), instructions: 'Complete the Google Antigravity authorization in your browser.' } as AuthEvent)
+      } catch (error) { cleanup(); reject(error) }
+    })
+    interaction.signal?.addEventListener('abort', abort, { once: true })
+    if (interaction.signal?.aborted) abort()
   })
-
-  const auth = new URL(AUTHORIZE_URL)
-  auth.search = new URLSearchParams({
-    client_id: clientConfig.clientId,
-    response_type: 'code',
-    redirect_uri: REDIRECT_URI,
-    scope: ANTIGRAVITY_SCOPES.join(' '),
-    code_challenge: challenge,
-    code_challenge_method: 'S256',
-    state,
-    access_type: 'offline',
-    prompt: 'consent',
-  }).toString()
-
-  // Notify happens before awaiting the callback so the browser can open the URL.
-  const notifyEvent: AuthEvent = { type: 'auth_url', url: auth.toString(), instructions: 'Complete the Google Antigravity authorization in your browser.' } as AuthEvent
-  interaction.notify(notifyEvent)
 
   const tokens = await exchange(new URLSearchParams({
     client_id: clientConfig.clientId,

@@ -31,24 +31,32 @@ type LoginStatus =
   | { kind: 'cancelled' }
 
 const PREFIX = '/_dsh/dsh-agy'
-const MUTATING = new Set(['login', 'logout', 'activate'])
+const MUTATING = new Set(['login', 'logout', 'activate', 'cancel-login', 'refresh-models'])
 
-function rpc(method: string, args?: Record<string, unknown>): Promise<any> {
-  const url = `${PREFIX}/${method}`
+async function rpc<T>(method: string, args?: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+  const query = !MUTATING.has(method) && args ? `?${new URLSearchParams(Object.entries(args).map(([key, value]) => [key, String(value)]))}` : ''
+  const url = `${PREFIX}/${method}${query}`
   const controller = new AbortController()
-  const timeout = window.setTimeout(() => controller.abort(), 15000)
+  const abort = () => controller.abort()
+  signal?.addEventListener('abort', abort, { once: true })
+  if (signal?.aborted) controller.abort()
+  const timeout = window.setTimeout(() => controller.abort(), method === 'quota' ? 60000 : 15000)
   const mutating = MUTATING.has(method)
-  return fetch(url, {
+  try {
+    const response = await fetch(url, {
     method: mutating ? 'POST' : 'GET',
     headers: { 'content-type': 'application/json' },
     body: mutating ? JSON.stringify(args ?? {}) : undefined,
     signal: controller.signal,
-  })
-    .then((r) => r.json().catch(() => ({})).then((body) => {
-      if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`)
-      return body
-    }))
-    .finally(() => window.clearTimeout(timeout))
+      cache: 'no-store',
+    })
+    const body = await response.json() as T & { error?: string }
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+    return body
+  } finally {
+    window.clearTimeout(timeout)
+    signal?.removeEventListener('abort', abort)
+  }
 }
 
 function Row(props: { title: string; desc?: React.ReactNode; controls?: React.ReactNode }): React.ReactElement {
@@ -109,106 +117,195 @@ function AntigravityPage(): React.ReactElement {
   const [busy, setBusy] = React.useState(false)
   const [quota, setQuota] = React.useState('')
   const [quotaLoading, setQuotaLoading] = React.useState(false)
-  const pollRef = React.useRef<number | null>(null)
+  const [activity, setActivity] = React.useState('')
+  const [authorizationUrl, setAuthorizationUrl] = React.useState('')
+  const [notice, setNotice] = React.useState('')
+  const [actionBusy, setActionBusy] = React.useState(false)
+  const loginRef = React.useRef<AbortController | null>(null)
+  const loginIdRef = React.useRef<string | null>(null)
+  const popupRef = React.useRef<Window | null>(null)
+  const lifetimeRef = React.useRef<AbortController | null>(null)
+  const loadingRef = React.useRef(false)
   const activeRef = React.useRef(true)
 
-  const load = React.useCallback(() => {
-    rpc('status').then((body) => {
-      if (activeRef.current) { setAccounts(body.accounts ?? []); setError('') }
-    }).catch(() => { if (activeRef.current) setError('Could not reach the host.') })
+  const load = React.useCallback(async () => {
+    if (loadingRef.current) return
+    loadingRef.current = true
+    try {
+      const body = await rpc<{ accounts: AccountView[] }>('status', undefined, lifetimeRef.current?.signal)
+      if (activeRef.current) setAccounts(body.accounts)
+    } catch {
+      if (activeRef.current) setError('No se pudo conectar con Harness. Comprueba la conexión y vuelve a intentarlo.')
+    } finally {
+      loadingRef.current = false
+    }
   }, [])
 
   React.useEffect(() => {
     activeRef.current = true
+    lifetimeRef.current = new AbortController()
     load()
     const timer = window.setInterval(load, 5000)
     return () => {
       activeRef.current = false
       window.clearInterval(timer)
-      if (pollRef.current !== null) window.clearInterval(pollRef.current)
+      lifetimeRef.current?.abort()
+      loginRef.current?.abort()
+      popupRef.current?.close()
     }
   }, [load])
 
-  const startLogin = React.useCallback(() => {
-    if (busy) return
-    setBusy(true); setError('')
-    rpc('login').then((res) => {
-      if (res.authorizationUrl) window.open(res.authorizationUrl, '_blank')
-      const loginId: string = res.loginId
-      if (pollRef.current !== null) window.clearInterval(pollRef.current)
-      pollRef.current = window.setInterval(() => {
-        fetch(`${PREFIX}/poll?loginId=${encodeURIComponent(loginId)}`)
-          .then((r) => r.json())
-          .then((st: LoginStatus) => {
-            if (!activeRef.current) return
-            if (st.kind === 'succeeded') {
-              if (pollRef.current !== null) window.clearInterval(pollRef.current)
-              pollRef.current = null; setBusy(false); load()
-            } else if (st.kind === 'failed' || st.kind === 'cancelled') {
-              if (pollRef.current !== null) window.clearInterval(pollRef.current)
-              pollRef.current = null; setBusy(false)
-              setError(st.kind === 'failed' ? st.message : 'Login cancelled.')
-            }
-          })
-          .catch(() => undefined)
-      }, 2000)
-    }).catch((e: Error) => { setBusy(false); setError(e.message) })
-  }, [busy, load])
+  const startLogin = React.useCallback(async () => {
+    if (loginRef.current) return
+    const controller = new AbortController()
+    loginRef.current = controller
+    // Open during the click, before any await, so browsers do not block OAuth.
+    let popup: Window | null = null
+    try {
+      popup = window.open('about:blank', '_blank', 'popup,width=600,height=760')
+      if (popup) { popup.opener = null; popup.document.title = 'Conectando con Google…' }
+    } catch { popup?.close(); popup = null }
+    popupRef.current = popup
+    setBusy(true); setError(''); setNotice('Preparando la conexión con Google…'); setAuthorizationUrl('')
+    let timedOut = false
+    const deadline = window.setTimeout(() => { timedOut = true; controller.abort() }, 5 * 60 * 1000)
+    try {
+      const res = await rpc<{ loginId: string; authorizationUrl: string }>('login', undefined, controller.signal)
+      loginIdRef.current = res.loginId
+      if (controller.signal.aborted) return
+      const url = new URL(res.authorizationUrl)
+      if (!res.loginId || url.protocol !== 'https:') throw new Error('El servidor devolvió una autorización no válida.')
+      setAuthorizationUrl(url.href)
+      setNotice('Completa la autorización en Google. Si no se abrió la ventana, utiliza el enlace siguiente.')
+      if (popup && !popup.closed) {
+        try { popup.location.replace(url.href) } catch { /* The fallback link remains available. */ }
+      }
+      let failures = 0
+      while (!controller.signal.aborted) {
+        let status: LoginStatus
+        try {
+          status = await rpc<LoginStatus>('poll', { loginId: res.loginId }, controller.signal)
+          failures = 0
+        } catch (error) {
+          if (controller.signal.aborted) break
+          if (++failures >= 4) throw error
+          setNotice('Conexión interrumpida; reintentando comprobar la autorización…')
+          status = { kind: 'pending' }
+        }
+        if (controller.signal.aborted) break
+        if (status.kind === 'succeeded') {
+          setNotice(status.email ? `Cuenta conectada: ${status.email}` : 'Cuenta conectada correctamente.')
+          setQuota('')
+          await load()
+          return
+        }
+        if (status.kind === 'failed') throw new Error(status.message)
+        if (status.kind === 'cancelled') throw new Error('La autorización se ha cancelado.')
+        if (status.kind !== 'pending') throw new Error('Respuesta de autorización no válida.')
+        await new Promise<void>((resolve) => {
+          const finish = () => { window.clearTimeout(timer); controller.signal.removeEventListener('abort', finish); resolve() }
+          const timer = window.setTimeout(finish, 2000)
+          controller.signal.addEventListener('abort', finish, { once: true })
+        })
+      }
+    } catch (error) {
+      if (activeRef.current && !controller.signal.aborted) {
+        setNotice('')
+        setError(error instanceof Error ? error.message : 'No se pudo conectar con Google.')
+      }
+    } finally {
+      window.clearTimeout(deadline)
+      if (controller.signal.aborted && loginIdRef.current) {
+        void rpc('cancel-login', { loginId: loginIdRef.current }).catch(() => undefined)
+      }
+      popup?.close()
+      if (loginRef.current === controller) {
+        loginRef.current = null
+        loginIdRef.current = null
+        popupRef.current = null
+        if (activeRef.current) {
+          setBusy(false); setAuthorizationUrl('')
+          if (controller.signal.aborted) setNotice(timedOut ? 'La autorización agotó el plazo de cinco minutos. Vuelve a conectar.' : 'Autorización cancelada.')
+        }
+      }
+    }
+  }, [load])
 
   const logout = React.useCallback((accountId?: string) => {
-    if (!window.confirm(accountId ? 'Remove this Antigravity account from this device?' : 'Disconnect all Antigravity accounts?')) return
-    rpc('logout', accountId ? { accountId } : {}).then(() => load()).catch((e: Error) => setError(e.message))
-  }, [load])
+    if (actionBusy || !window.confirm(accountId ? '¿Eliminar esta cuenta de Antigravity de este dispositivo?' : '¿Desconectar todas las cuentas de Antigravity?')) return
+    setActionBusy(true); setError('')
+    rpc('logout', accountId ? { accountId } : {}, lifetimeRef.current?.signal).then(() => { if (activeRef.current) { setQuota(''); void load() } }).catch((e: Error) => { if (activeRef.current) setError(e.message) }).finally(() => { if (activeRef.current) setActionBusy(false) })
+  }, [load, actionBusy])
 
   const activate = React.useCallback((accountId: string) => {
-    rpc('activate', { accountId }).then(() => load()).catch((e: Error) => setError(e.message))
-  }, [load])
+    if (actionBusy) return
+    setActionBusy(true); setError('')
+    rpc('activate', { accountId }, lifetimeRef.current?.signal).then(() => load()).catch((e: Error) => { if (activeRef.current) setError(e.message) }).finally(() => { if (activeRef.current) setActionBusy(false) })
+  }, [load, actionBusy])
 
   const showQuota = React.useCallback(() => {
-    setQuotaLoading(true)
-    rpc('quota').then((b) => { setQuota(b.report ?? '') }).catch((e: Error) => setError(e.message)).finally(() => setQuotaLoading(false))
+    setQuotaLoading(true); setError('')
+    rpc<{ report: string }>('quota', undefined, lifetimeRef.current?.signal).then((b) => { if (activeRef.current) setQuota(b.report || 'No hay información de cuotas disponible.') }).catch((e: Error) => { if (activeRef.current) setError(e.message) }).finally(() => { if (activeRef.current) setQuotaLoading(false) })
+  }, [])
+
+  const showStats = React.useCallback(() => {
+    rpc<{ accounts: Array<{ accountId: string; success: number; rateLimits: number; errors: number }> }>('stats', undefined, lifetimeRef.current?.signal)
+      .then((result) => {
+        if (activeRef.current) setActivity(result.accounts.map((entry) => `${entry.accountId.slice(0, 8)}: ${entry.success} completadas · ${entry.rateLimits} límites · ${entry.errors} errores`).join('\n') || 'Sin actividad en esta instancia.')
+      }).catch((error: Error) => { if (activeRef.current) setError(error.message) })
+  }, [])
+
+  const refreshModels = React.useCallback(() => {
+    rpc('refresh-models', {}, lifetimeRef.current?.signal)
+      .then(() => { if (activeRef.current) setNotice('Actualización de modelos solicitada. Comprueba el selector de modelos.') })
+      .catch((error: Error) => { if (activeRef.current) setError(error.message) })
   }, [])
 
   if (accounts === null) {
-    return <div className="agy-page"><p className="agy-note">Loading…</p></div>
+    return <div className="agy-page"><p className="agy-note">Cargando cuentas…</p>{error ? <><p className="agy-error" role="alert">{error}</p><Button onClick={() => { setError(''); void load() }}>Reintentar</Button></> : null}</div>
   }
 
   const rows: React.ReactElement[] = []
   if (accounts.length === 0) {
-    rows.push(<Row key="empty" title="No accounts" desc="Sign in with your Google account to use Antigravity (Gemini / Claude / GPT-OSS) models." controls={<Button onClick={startLogin} disabled={busy}>{busy ? 'Opening browser…' : 'Sign in'}</Button>} />)
+    rows.push(<Row key="empty" title="Sin cuentas conectadas" desc="Conecta tu cuenta de Google para utilizar los modelos disponibles en tu plan de Antigravity." controls={<Button onClick={startLogin} disabled={busy}>{busy ? 'Esperando autorización…' : 'Conectar con Google'}</Button>} />)
   } else {
     for (const a of accounts) {
       const pill = a.active
-        ? <span className="agy-pill agy-pill--ok">active</span>
-        : a.rateLimited ? <span className="agy-pill agy-pill--warn">rate-limited</span> : null
+         ? <span className="agy-pill agy-pill--ok">Activa</span>
+        : null
       const controls = (
         <>
           {pill}
-          {!a.active ? <Button onClick={() => activate(a.id)}>Make active</Button> : null}
-          <Button onClick={startLogin} disabled={busy}>Add</Button>
-          <Button danger onClick={() => logout(a.id)}>Remove</Button>
+          {!a.active ? <Button onClick={() => activate(a.id)} disabled={actionBusy || busy || !a.enabled}>Activar</Button> : null}
+          <Button danger onClick={() => logout(a.id)} disabled={actionBusy || busy}>Eliminar</Button>
         </>
       )
-      const state = [a.enabled ? null : 'disabled', a.rateLimited ? 'rate-limited' : null, a.coolingDown ? 'cooling down' : null].filter(Boolean).join(' · ')
+      const state = [a.enabled ? 'Habilitada' : 'Deshabilitada', a.rateLimited ? 'Límite de uso alcanzado' : null, a.coolingDown ? 'En espera de recuperación' : null].filter(Boolean).join(' · ')
       rows.push(<Row key={a.id} title={a.email ?? a.id.slice(0, 8)} desc={state || undefined} controls={controls} />)
     }
-    rows.push(<Row key="add" title="Add another account" controls={<Button onClick={startLogin} disabled={busy}>{busy ? 'Opening browser…' : 'Sign in'}</Button>} />)
-    rows.push(<Row key="all" title="Manage" controls={<Button onClick={showQuota} disabled={quotaLoading}>{quotaLoading ? 'Loading…' : 'Show quota'}</Button>} />)
-    rows.push(<Row key="disconnect" title="Disconnect" controls={<Button danger onClick={() => logout(undefined)}>Disconnect all</Button>} />)
+    rows.push(<Row key="add" title="Añadir otra cuenta" controls={<Button onClick={startLogin} disabled={busy || actionBusy}>{busy ? 'Esperando autorización…' : 'Conectar con Google'}</Button>} />)
+    rows.push(<Row key="all" title="Cuotas de las cuentas" desc="Consulta las ventanas de uso y la disponibilidad informadas por Antigravity." controls={<Button onClick={showQuota} disabled={quotaLoading || actionBusy}>{quotaLoading ? 'Consultando…' : 'Consultar cuotas'}</Button>} />)
+    rows.push(<Row key="models" title="Modelos disponibles" controls={<Button onClick={refreshModels} disabled={busy || actionBusy}>Actualizar modelos</Button>} />)
+    rows.push(<Row key="stats" title="Actividad de esta instancia" controls={<Button onClick={showStats}>Consultar actividad</Button>} />)
+    rows.push(<Row key="disconnect" title="Desconectar" controls={<Button danger onClick={() => logout(undefined)} disabled={actionBusy || busy}>Desconectar todas</Button>} />)
   }
 
   return (
     <div className="agy-page">
       <div className="agy-list">{rows}</div>
+      {notice ? <p className="agy-note" role="status">{notice}</p> : null}
+      {authorizationUrl ? <p className="agy-note"><a href={authorizationUrl} target="_blank" rel="noopener noreferrer">Abrir autorización de Google</a></p> : null}
+      {busy ? <Button onClick={() => loginRef.current?.abort()}>Cancelar autorización</Button> : null}
       {error ? <p className="agy-error" role="alert">{error}</p> : null}
       {quota ? <pre className="agy-quota">{quota}</pre> : null}
-      <p className="agy-note">Tokens and account data are stored only on this device, under your Harness home directory.</p>
+      {activity ? <pre className="agy-quota">{activity}</pre> : null}
+      <p className="agy-note">Los tokens y los datos de las cuentas se guardan en el dispositivo donde se ejecuta Harness. Si accedes de forma remota, la autorización debe completarse en un navegador de ese dispositivo.</p>
     </div>
   )
 }
 
 function BundleConfig(props: { view?: string }): React.ReactElement {
-  if (props.view === 'summary') return <span>Sign in with Google to use Antigravity models.</span>
+  if (props.view === 'summary') return <span>Conecta tu cuenta de Google para utilizar los modelos de Antigravity.</span>
   return <AntigravityPage />
 }
 

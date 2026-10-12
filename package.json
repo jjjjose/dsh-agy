@@ -31,6 +31,8 @@
     "cordis.patch.yml",
     "README.md",
     "docs/INSTALL.md",
+    "docs/ARCHITECTURE.md",
+    "docs/VALIDATION.md",
     "LICENSE"
   ],
   "scripts": {
@@ -39,7 +41,7 @@
     "typecheck": "tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run build && npm run smoke && npm test"
   },
   "dsh": {
     "bundle": {
@@ -58,6 +60,7 @@
     "@deepseek-ai/dsh-credentials": "^0.0.1-rc.1",
     "@deepseek-ai/dsh-llm": "^0.0.1-rc.1",
     "@deepseek-ai/dsh-llm-pi-ai": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1",
     "@deepseek-ai/schemastery": "^3.18.4",
     "react": "^18.2.0"
   },

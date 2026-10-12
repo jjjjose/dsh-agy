@@ -67,7 +67,7 @@ export async function executeSearch(
   projectId: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const { query, urls } = args
+  const { query, urls, thinking = true } = args
   let prompt = query
   if (urls && urls.length > 0) prompt = `${query}\n\nURLs to analyze:\n${urls.join('\n')}`
   const tools: Array<Record<string, unknown>> = [{ googleSearch: {} }]
@@ -82,7 +82,7 @@ export async function executeSearch(
       systemInstruction: { parts: [{ text: SEARCH_SYSTEM_INSTRUCTION }] },
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       tools,
-      generationConfig: { temperature: 0, topP: 1 },
+      generationConfig: { temperature: 0, topP: 1, thinkingConfig: { thinkingBudget: thinking ? 8192 : 0 } },
       sessionId: `${sessionPrefix}-${++sessionCounter}`,
     },
   }
@@ -94,15 +94,17 @@ export async function executeSearch(
         method: 'POST',
         headers: antiGravityHeaders(access),
         body: JSON.stringify(payload),
-        signal: signal ?? AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(SEARCH_TIMEOUT_MS)]) : AbortSignal.timeout(SEARCH_TIMEOUT_MS),
       })
       if (!response.ok) {
         lastError = `HTTP ${response.status}`
+        await response.body?.cancel()
         if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break
         continue
       }
       return parseAndFormat((await response.json()) as SearchResponse)
     } catch (error) {
+      if (signal?.aborted) throw signal.reason
       lastError = error instanceof Error ? error.message : String(error)
     }
   }

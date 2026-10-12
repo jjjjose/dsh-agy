@@ -25,7 +25,10 @@ Sign in with your Google account and use the models from your **Antigravity Codi
 1. Open **Plugins → Add plugin**.
 2. Add this package (from a local folder, a git URL, or npm once published).
 3. The prebuilt `lib/` is committed, so there is **no build step**.
-4. Open the plugin's settings page and click **Sign in**.
+4. Open **Plugins → Google Antigravity** and click **Conectar con Google**.
+5. Complete authorization, then select a model under **Google Antigravity** in the conversation model picker.
+
+The settings page provides an authorization link if the browser blocks the popup, account activation/removal, quota queries, model refresh and runtime activity. Follow [`docs/VALIDATION.md`](docs/VALIDATION.md) to check the complete flow in your installed DSH version.
 
 See [`docs/INSTALL.md`](docs/INSTALL.md) for details, including the CLI `web` profile.
 
@@ -81,7 +84,7 @@ npm run smoke          # structural check that lib/ is loadable by the Harness
 
 - **Internal API**: relies on Google's `v1internal` Cloud Code Assist endpoints, which can change without notice.
 - **Embedded client**: Google may rotate or revoke the embedded OAuth client; set the `oauthClientConfigRef` override if that happens.
-- **Model-callable tools**: quota is available in the settings UI. Search and engine stats exist as reusable modules (`src/search.ts`) but are not yet exposed as tools the model can call — the Harness custom-tool registration API needs verification against your installed DSH version. This is the main follow-up.
+- **Model-callable tools**: `antigravity_quota`, `antigravity_stats` and `google_search` are registered with the official DSH `tools` service. Quota and runtime activity also appear in the settings UI. Search has an authenticated RPC (`POST /_dsh/dsh-agy/search`). Tool visibility depends on the agent's tool policy and the host presentation mode.
 - **Version drift**: the plugin builds against the Harness `@deepseek-ai/*` API surface used by the reference plugins; if your DSH version changes those shapes, update `types/dsh-modules.d.ts` and re-run `npm run typecheck`.
 
 
