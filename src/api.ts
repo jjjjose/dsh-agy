@@ -118,13 +118,14 @@ export function buildEnvelope(
   if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = options.maxTokens
   if (Object.keys(generationConfig).length > 0) request.generationConfig = generationConfig
   if (context.tools !== undefined && context.tools.length > 0) {
-    request.tools = convertTools(context.tools, model.id.startsWith('claude-'))
+    // Cloud Code Assist's function declarations use the protobuf Schema field,
+    // not the public Gemini API's arbitrary parametersJsonSchema field.
+    request.tools = convertTools(context.tools, true)
     request.tools = (request.tools as Array<{ functionDeclarations?: Array<Record<string, unknown>> }>).map((tool) => ({
       ...tool,
       functionDeclarations: tool.functionDeclarations?.map((declaration) => ({
         ...declaration,
-        ...declaration.parameters === undefined ? {} : { parameters: cleanSchema(declaration.parameters) },
-        ...declaration.parametersJsonSchema === undefined ? {} : { parametersJsonSchema: cleanSchema(declaration.parametersJsonSchema) },
+        parameters: normalizeToolSchema(declaration.parameters, model.id.startsWith('claude-')),
       })),
     }))
   }
@@ -136,6 +137,21 @@ export function buildEnvelope(
     userAgent: 'antigravity',
     requestId: `agent-${crypto.randomUUID()}`,
   }
+}
+
+function normalizeToolSchema(value: unknown, claude: boolean): Record<string, unknown> {
+  const cleaned = cleanSchema(value, !claude)
+  const schema: Record<string, unknown> = typeof cleaned === 'object' && cleaned !== null && !Array.isArray(cleaned)
+    ? { ...cleaned as Record<string, unknown>, type: claude ? 'object' : 'OBJECT' }
+    : { type: claude ? 'object' : 'OBJECT' }
+  const properties = schema.properties
+  if (typeof properties !== 'object' || properties === null || !Object.keys(properties).length) {
+    if (claude) {
+      return { ...schema, properties: { _placeholder: { type: 'boolean', description: 'Placeholder. Always pass true.' } }, required: ['_placeholder'] }
+    }
+    return { ...schema, properties: {} }
+  }
+  return schema
 }
 
 /** Open an SSE response, retrying across endpoints and rate-limited accounts. */
@@ -255,6 +271,9 @@ export function streamAntiGravity(
           if (part.text === undefined && part.thoughtSignature !== undefined && current?.type === 'thinking') {
             current.thinkingSignature = part.thoughtSignature
           }
+          if (part.text === undefined && part.thoughtSignature !== undefined && current?.type === 'text') {
+            current.textSignature = part.thoughtSignature
+          }
           if (part.text !== undefined) {
             const thinking = isThinkingPart(part)
             let active = current
@@ -279,6 +298,8 @@ export function streamAntiGravity(
               stream.push({ type: 'thinking_delta', contentIndex: index, delta: part.text, partial: output })
             } else {
               active.text += part.text
+              const signature = retainThoughtSignature(active.textSignature, part.thoughtSignature)
+              if (signature !== undefined) active.textSignature = signature
               stream.push({ type: 'text_delta', contentIndex: index, delta: part.text, partial: output })
             }
           }
@@ -299,15 +320,6 @@ export function streamAntiGravity(
             stream.push({ type: 'toolcall_end', contentIndex: index, toolCall, partial: output })
           }
         }
-        if (candidate?.finishReason !== undefined) {
-          finishReason = candidate.finishReason
-          output.stopReason = mapStopReasonString(candidate.finishReason)
-          if (output.stopReason === 'error') {
-            provider.reportDiagnostic?.({ model: model.id, finishReason, kind: 'generation-finish-error' })
-            throw new Error(`Antigravity generation failed: ${finishReason}`)
-          }
-        }
-        if (output.content.some((block) => block.type === 'toolCall')) output.stopReason = 'toolUse'
         const usage = data.usageMetadata
         if (usage !== undefined) {
           const cacheRead = usage.cachedContentTokenCount ?? 0
@@ -322,6 +334,17 @@ export function streamAntiGravity(
           }
           calculateCost(model, output.usage)
         }
+        // Finish errors may carry usage in the same frame. Preserve it before
+        // reporting the terminal error to the harness.
+        if (candidate?.finishReason !== undefined) {
+          finishReason = candidate.finishReason
+          output.stopReason = mapStopReasonString(candidate.finishReason)
+          if (output.stopReason === 'error') {
+            provider.reportDiagnostic?.({ model: model.id, finishReason, kind: 'generation-finish-error' })
+            throw new Error(`Antigravity generation failed: ${finishReason}`)
+          }
+        }
+        if (output.content.some((block) => block.type === 'toolCall')) output.stopReason = 'toolUse'
       }
       for await (const text of readSse(response.body, options.signal)) consume(JSON.parse(text) as ResponseChunk)
       closeCurrent()

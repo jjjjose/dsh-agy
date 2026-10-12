@@ -12,6 +12,8 @@ import type { AccountQuotaResult } from './types.ts'
 import { formatQuotaReport, fetchAccountQuota } from './quota.ts'
 import type { EngineStats } from './stats.ts'
 import { executeSearch } from './search.ts'
+import { UpdateInputError } from './self-update.ts'
+import type { SelfUpdater } from './self-update.ts'
 
 export const ROUTE_PREFIX = '/_dsh/dsh-agy'
 const MAX_BODY_BYTES = 64 * 1024
@@ -63,7 +65,7 @@ export function registerRpc(
   webServer: WebServerService,
   connection: ConnectionService,
   manager: AccountManager,
-  options: { refreshModels?: () => void; stats?: EngineStats } = {},
+  options: { refreshModels?: () => void; stats?: EngineStats; updater?: SelfUpdater } = {},
 ): () => void {
   return webServer.register({
     kind: 'prefix',
@@ -84,6 +86,11 @@ export function registerRpc(
         const method = req.method ?? 'GET'
 
         if (method === 'GET') {
+          if (path === '/update/status') {
+            if (!options.updater) { send(res, 503, { error: 'Self-updater unavailable' }); return }
+            send(res, 200, options.updater.visitSettings())
+            return
+          }
           if (path === '/stats') {
             send(res, 200, options.stats?.snapshot() ?? { accounts: [] })
             return
@@ -116,6 +123,15 @@ export function registerRpc(
 
         if (method === 'POST') {
           const body = await readJsonBody(req)
+          if (['/update/check', '/update/install', '/update/config'].includes(path)) {
+            if (!options.updater) { send(res, 503, { error: 'Self-updater unavailable' }); return }
+            options.updater.visitSettings()
+            if (path === '/update/install' && body.confirm !== true) throw new RpcInputError('Explicit confirm: true is required')
+            const result = path === '/update/config' ? await options.updater.configure(body)
+              : path === '/update/check' ? await options.updater.check() : await options.updater.update()
+            send(res, 200, result)
+            return
+          }
           if (path === '/refresh-models') {
             options.refreshModels?.()
             send(res, 202, { ok: true })
@@ -166,7 +182,8 @@ export function registerRpc(
 
         send(res, 405, { error: 'method not allowed' })
       } catch (error) {
-        send(res, error instanceof RpcInputError ? 400 : 500, { error: error instanceof RpcInputError ? error.message : 'The operation failed. Check account status and try again.' })
+        const inputError = error instanceof RpcInputError || error instanceof UpdateInputError
+        send(res, inputError ? 400 : 500, { error: inputError ? error.message : 'The operation failed. Check account status and try again.' })
       }
     },
   })

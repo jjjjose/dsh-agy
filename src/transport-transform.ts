@@ -18,29 +18,39 @@ export function resolveWireModel(id: string): { id: string; thinking?: Record<st
 const SCHEMA_KEYS = new Set(['type', 'description', 'properties', 'required', 'items', 'enum', 'nullable', 'anyOf', 'format', 'minimum', 'maximum', 'minItems', 'maxItems'])
 
 /** Remove unsupported JSON Schema keywords without interpreting property names as keywords. */
-export function cleanSchema(value: unknown): unknown {
+export function cleanSchema(value: unknown, uppercase = false): unknown {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
   const source = value as Record<string, unknown>
   const result: Record<string, unknown> = {}
   for (const [key, item] of Object.entries(source)) {
     if (!SCHEMA_KEYS.has(key)) continue
     if (key === 'properties' && typeof item === 'object' && item !== null) {
-      result[key] = Object.fromEntries(Object.entries(item).map(([name, schema]) => [name, cleanSchema(schema)]))
-    } else if (key === 'items') result[key] = cleanSchema(item)
-    else if (key === 'anyOf' && Array.isArray(item)) result[key] = item.map(cleanSchema)
+      result[key] = Object.fromEntries(Object.entries(item).map(([name, schema]) => [name, cleanSchema(schema, uppercase)]))
+    } else if (key === 'items') result[key] = cleanSchema(item, uppercase)
+    else if (key === 'anyOf' && Array.isArray(item)) result[key] = item.map((schema) => cleanSchema(schema, uppercase))
+    else if (key === 'type' && typeof item === 'string') result[key] = uppercase ? item.toUpperCase() : item
     else result[key] = item
   }
   if ('const' in source) result.enum = [source.const]
+  if (Array.isArray(result.required)) {
+    const properties = result.properties as Record<string, unknown> | undefined
+    const required = result.required.filter((name) => typeof name === 'string' && properties !== undefined && Object.hasOwn(properties, name))
+    if (required.length) result.required = required
+    else delete result.required
+  }
+  if (typeof result.type === 'string' && result.type.toLowerCase() === 'array' && result.items === undefined) {
+    result.items = { type: uppercase ? 'STRING' : 'string' }
+  }
   return result
 }
 
 /** Normalize converted history; never replay Claude thinking or cross-model signatures. */
 export function cleanContents(value: unknown, claude: boolean): unknown {
   if (!Array.isArray(value)) return value
-  const pending: Array<{ id: string; name: string }> = []
+  const pending: Array<{ id?: string; name: string }> = []
   const contents: Array<{ role?: string; parts: Array<Record<string, unknown>> }> = []
   const interrupted = (): Array<Record<string, unknown>> => pending.splice(0).map((call) => ({
-    functionResponse: { id: call.id, name: call.name, response: { error: 'Tool execution was interrupted before a result was recorded.' } },
+    functionResponse: { ...call.id === undefined ? {} : { id: call.id }, name: call.name, response: { error: 'Tool execution was interrupted before a result was recorded.' } },
   }))
   for (const content of value as Array<{ role?: string; parts?: Array<Record<string, unknown>> }>) {
     if (content.role === 'model' && pending.length) contents.push({ role: 'user', parts: interrupted() })
@@ -50,9 +60,11 @@ export function cleanContents(value: unknown, claude: boolean): unknown {
       if (claude) delete part.thoughtSignature
       const call = part.functionCall as { id?: string; name?: string } | undefined
       if (call?.name) {
-        const id = call.id ?? crypto.randomUUID()
+        // pi-ai intentionally omits IDs for Gemini. Do not manufacture wire IDs
+        // on that path; Claude requires them and retains ID-based matching.
+        const id = call.id ?? (claude ? crypto.randomUUID() : undefined)
         pending.push({ id, name: call.name })
-        part.functionCall = { ...call, id }
+        part.functionCall = { ...call, ...id === undefined ? {} : { id } }
       }
       const response = part.functionResponse as { id?: string; name?: string } | undefined
       if (response) {
@@ -60,7 +72,7 @@ export function cleanContents(value: unknown, claude: boolean): unknown {
         if (index < 0 && response.name) index = pending.findIndex((call) => call.name === response.name)
         if (index < 0) return []
         const [call] = pending.splice(index, 1)
-        part.functionResponse = { ...response, name: call!.name, id: call!.id }
+        part.functionResponse = { ...response, name: call!.name, ...call!.id === undefined ? {} : { id: call!.id } }
       }
       return [part]
     })

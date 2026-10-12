@@ -22,6 +22,7 @@ import { PROVIDER, fetchAvailableModels, maintainedModels } from './models.ts'
 import { registerRpc } from './rpc.ts'
 import { EngineStats } from './stats.ts'
 import { registerTools } from './tools.ts'
+import { createSelfUpdater, DEFAULT_UPDATE_INTERVAL_MS } from './self-update.ts'
 
 export const name = 'dsh-agy'
 export const inject = ['llm', 'credentials', 'tools']
@@ -42,6 +43,9 @@ export interface Config {
   maxRequestImageBytes?: number
   requestImagePixelBudget?: number
   requestImageMaxBytes?: number
+  autoUpdateEnabled?: boolean
+  autoUpdateIntervalMs?: number
+  updateRegistryOrigin?: string
 }
 
 export const Config = z.object({
@@ -52,6 +56,9 @@ export const Config = z.object({
   maxRequestImageBytes: z.number().min(1).default(DEFAULT_MAX_IMAGE_BYTES),
   requestImagePixelBudget: z.number().min(1).default(DEFAULT_IMAGE_PIXEL_BUDGET),
   requestImageMaxBytes: z.number().min(1).default(DEFAULT_IMAGE_MAX_BYTES),
+  autoUpdateEnabled: z.boolean().default(false),
+  autoUpdateIntervalMs: z.number().min(60000).max(604800000).default(DEFAULT_UPDATE_INTERVAL_MS),
+  updateRegistryOrigin: z.string().default(''),
 })
 
 interface ResolvedConfig {
@@ -120,6 +127,12 @@ function profileFor(manager: AccountManager, config: ResolvedConfig, models: rea
  */
 export function apply(ctx: DshContext, rawConfig: Config): void {
   const config = resolveConfig(rawConfig)
+  const updater = createSelfUpdater({ config: {
+    enabled: rawConfig.autoUpdateEnabled ?? false,
+    intervalMs: rawConfig.autoUpdateIntervalMs ?? DEFAULT_UPDATE_INTERVAL_MS,
+    registryOrigin: rawConfig.updateRegistryOrigin ?? '',
+  } })
+  ctx.effect(() => { updater.start(); return () => updater.dispose() }, 'dsh-agy: package self-update')
   const oauth = createAntiGravityOAuth(() =>
     resolveOAuthClientConfig(ctx.credentials, config.oauthClientConfigRef))
   const manager = new AccountManager({
@@ -198,7 +211,7 @@ export function apply(ctx: DshContext, rawConfig: Config): void {
 
   // Register RPC once the web server and connection gate are available.
   ctx.inject(['connection', 'webServer'], (webCtx) => {
-    const dispose = registerRpc(webCtx.webServer, webCtx.connection, manager, { refreshModels: refresh, stats })
+    const dispose = registerRpc(webCtx.webServer, webCtx.connection, manager, { refreshModels: refresh, stats, updater })
     webCtx.effect(() => dispose, 'dsh-agy: rpc')
   })
 }

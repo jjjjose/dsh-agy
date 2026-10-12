@@ -4,6 +4,7 @@
  * `/_dsh/dsh-agy/*`. Classic JSX so the bundle only needs `require('react')`.
  */
 import * as React from 'react'
+import type { UpdateStatus } from '../self-update.ts'
 
 interface SlotsService {
   inject(name: string, factory: () => unknown): () => void
@@ -31,7 +32,7 @@ type LoginStatus =
   | { kind: 'cancelled' }
 
 const PREFIX = '/_dsh/dsh-agy'
-const MUTATING = new Set(['login', 'logout', 'activate', 'cancel-login', 'refresh-models'])
+const MUTATING = new Set(['login', 'logout', 'activate', 'cancel-login', 'refresh-models', 'update/check', 'update/install', 'update/config'])
 
 async function rpc<T>(method: string, args?: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   const query = !MUTATING.has(method) && args ? `?${new URLSearchParams(Object.entries(args).map(([key, value]) => [key, String(value)]))}` : ''
@@ -40,7 +41,7 @@ async function rpc<T>(method: string, args?: Record<string, unknown>, signal?: A
   const abort = () => controller.abort()
   signal?.addEventListener('abort', abort, { once: true })
   if (signal?.aborted) controller.abort()
-  const timeout = window.setTimeout(() => controller.abort(), method === 'quota' ? 60000 : 15000)
+  const timeout = window.setTimeout(() => controller.abort(), method.startsWith('update/') ? 150000 : method === 'quota' ? 60000 : 15000)
   const mutating = MUTATING.has(method)
   try {
     const response = await fetch(url, {
@@ -307,9 +308,52 @@ function AntigravityPage(): React.ReactElement {
   )
 }
 
+/** Package updates are independent of account login and model-catalog refresh. */
+function PackageUpdates(): React.ReactElement {
+  const [state, setState] = React.useState<UpdateStatus | null>(null)
+  const [origin, setOrigin] = React.useState('')
+  const [minutes, setMinutes] = React.useState('360')
+  const [busy, setBusy] = React.useState(false)
+  const [error, setError] = React.useState('')
+  const lifetime = React.useRef<AbortController | null>(null)
+  React.useEffect(() => {
+    const controller = new AbortController()
+    lifetime.current = controller
+    rpc<UpdateStatus>('update/status', undefined, controller.signal).then((result) => {
+      if (!controller.signal.aborted) { setState(result); setOrigin(result.registryOrigin); setMinutes(String(result.intervalMs / 60000)) }
+    }).catch((error: Error) => { if (!controller.signal.aborted) setError(error.message) })
+    return () => controller.abort()
+  }, [])
+  const action = (method: string, body: Record<string, unknown> = {}) => {
+    if (busy) return
+    setBusy(true); setError('')
+    rpc<UpdateStatus>(method, body, lifetime.current?.signal).then((result) => {
+      if (!lifetime.current?.signal.aborted) setState(result)
+    }).catch((error: Error) => { if (!lifetime.current?.signal.aborted) setError(error.message) })
+      .finally(() => { if (!lifetime.current?.signal.aborted) setBusy(false) })
+  }
+  return <div className="agy-page">
+    <Row title="Actualización del plugin" desc={state ? `En ejecución: ${state.runningVersion} · Disco: ${state.diskVersion}${state.latest ? ` · Última versión: ${state.latest}` : ''}` : 'Consultando versión…'} controls={<Button disabled={busy || !state?.configured} onClick={() => action('update/check')}>Comprobar actualización</Button>} />
+    {state ? <>
+      <p className="agy-note">{!state.configured ? 'Origen no configurado. No se descargará ningún paquete hasta que confirmes un registro npm HTTPS de confianza que publique dsh-agy.' : state.pendingRestart ? 'La versión del disco cambió. Reinicia Harness para aplicarla.' : state.available ? 'Hay una versión nueva disponible.' : state.lastCheckAt ? 'No hay una versión más reciente disponible.' : 'Aún no se ha comprobado el origen.'}</p>
+      {!state.installAllowed ? <p className="agy-note">La instalación automática solo está permitida dentro de profiles de DSH; no se modifica una copia de desarrollo.</p> : null}
+      <Row title="Modo de actualización" desc="Automático comprueba e instala en el intervalo elegido. Al abrir esta página se pausa la instalación automática hasta reiniciar Harness." controls={<Button disabled={busy} onClick={() => action('update/config', { enabled: !state.enabled })}>{state.enabled ? 'Desactivar automático' : 'Activar automático'}</Button>} />
+      <Row title="Origen e intervalo" controls={<>
+        <input aria-label="Registro npm HTTPS de confianza" placeholder="https://registro-de-confianza" value={origin} onChange={(event) => setOrigin(event.target.value)} disabled={busy} />
+        <input aria-label="Intervalo en minutos" type="number" min="1" max="10080" value={minutes} onChange={(event) => setMinutes(event.target.value)} disabled={busy} />
+        <Button disabled={busy} onClick={() => { if (origin !== state.registryOrigin && origin && !window.confirm(`¿Confías en ${origin} para descargar y ejecutar versiones de dsh-agy?`)) return; action('update/config', { registryOrigin: origin, intervalMs: Number(minutes) * 60000 }) }}>Guardar</Button>
+      </>} />
+      {state.available ? <Button disabled={busy || !state.installAllowed || state.pendingRestart} onClick={() => { if (window.confirm(`¿Instalar dsh-agy ${state.latest}? Se guardará una copia de seguridad. Será necesario reiniciar Harness.`)) action('update/install', { confirm: true }) }}>Instalar {state.latest}</Button> : null}
+      {state.lastError ? <p className="agy-error" role="alert">Actualización no realizada: {state.lastError}. Se conserva la versión anterior; revisa el origen o instala manualmente.</p> : null}
+    </> : null}
+    {busy ? <p className="agy-note" role="status">Procesando actualización…</p> : null}
+    {error ? <p className="agy-error" role="alert">{error}</p> : null}
+  </div>
+}
+
 function BundleConfig(props: { view?: string }): React.ReactElement {
   if (props.view === 'summary') return <span>Conecta tu cuenta de Google para utilizar los modelos de Antigravity.</span>
-  return <AntigravityPage />
+  return <><AntigravityPage /><PackageUpdates /></>
 }
 
 export const inject = ['slots']
