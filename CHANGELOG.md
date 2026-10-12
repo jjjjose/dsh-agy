@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.2.1 — 2026-10-12
+
+### Corregido
+
+- Herramientas entregadas a Antigravity con `deferLoading`: enviarlas explícitamente en el catálogo nativo, sin modificar solicitudes congeladas ni cargar herramientas ajenas a la solicitud. Nuevo evento seguro `adapter-tools` para distinguir catálogo ausente de herramientas filtradas.
+- Desactivar llamadas de función (`NONE`) cuando la solicitud no contiene herramientas declaradas, aunque el prompt o el historial mencione herramientas.
+
 ## 0.2.0 — 2026-10-12
 
 ### Añadido
@@ -14,8 +21,6 @@
 
 ### Corregido
 
-- Herramientas entregadas a Antigravity con `deferLoading`: enviarlas explícitamente en el catálogo nativo, sin modificar solicitudes congeladas ni cargar herramientas ajenas a la solicitud. Nuevo evento seguro `adapter-tools` para distinguir catálogo ausente de herramientas filtradas.
-- Desactivar llamadas de función (`NONE`) cuando la solicitud no contiene herramientas declaradas, aunque el prompt o el historial mencione herramientas.
 - Una entrada por modelo/versión en el selector; variantes disponibles elegidas mediante el effort nativo de DSH y traducidas al ID real de Antigravity. IDs anteriores conservados como alias internos ocultos.
 - Validación de modelo/effort contra la cuenta que envía la solicitud, incluida la rotación, sin sustituir modelos ni bajar el esfuerzo silenciosamente. Respuestas tardías de otra cuenta no reemplazan el catálogo activo.
 - Esquemas de herramientas: conservar alternativas de `oneOf` mediante `anyOf`, normalizar uniones anulables y resolver referencias locales antes de eliminar definiciones. La conversión no modifica el catálogo original.
