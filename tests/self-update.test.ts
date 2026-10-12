@@ -130,6 +130,35 @@ describe('package self-update', () => {
     expect(install).not.toHaveBeenCalled()
     updater.dispose()
   })
+  it('does not downgrade or reinstall the current version', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ name: 'dsh-agy', version: '0.1.0', dist: { integrity: archive().integrity, tarball: 'https://registry.example/x' } })))
+    const install = vi.fn(async () => undefined)
+    const { updater } = await fixture({ config: configured, fetch: fetchMock, install })
+    expect((await updater.update()).available).toBe(false)
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(install).not.toHaveBeenCalled()
+    updater.dispose()
+  })
+  it('configuration changes invalidate an in-flight download before installation', async () => {
+    let resolveDownload!: (response: Response) => void
+    let downloadStarted!: () => void
+    const started = new Promise<void>((resolve) => { downloadStarted = resolve })
+    const payload = archive()
+    const fetchMock = vi.fn<typeof fetch>(async (url) => {
+      if (String(url).endsWith('/latest')) return new Response(JSON.stringify({ name: 'dsh-agy', version: '0.2.0', dist: { integrity: payload.integrity, tarball: 'https://registry.example/x' } }))
+      downloadStarted()
+      return new Promise<Response>((resolve) => { resolveDownload = resolve })
+    })
+    const install = vi.fn(async () => undefined)
+    const { updater } = await fixture({ config: { ...configured, enabled: true }, fetch: fetchMock, install })
+    const pending = updater.update(false)
+    await started
+    await updater.configure({ enabled: false })
+    resolveDownload(new Response(new Uint8Array(payload.tarball)))
+    await pending
+    expect(install).not.toHaveBeenCalled()
+    updater.dispose()
+  })
 })
 
 describe('update payload security', () => {
@@ -146,6 +175,15 @@ describe('update payload security', () => {
     const valid = archive()
     expect(() => extractUpdate(valid.tarball, valid.integrity, '9.0.0')).toThrow('identity-mismatch')
   })
+  it('prevents a downgrade if another process installed a newer version during download', async () => {
+    const { root, data, updater } = await fixture()
+    await fs.writeFile(join(root, 'package.json'), JSON.stringify({ name: 'dsh-agy', version: '0.3.0' }))
+    const valid = archive('0.2.0')
+    await expect(installUpdate(root, data, extractUpdate(valid.tarball, valid.integrity, '0.2.0'))).rejects.toThrow('package-version-changed')
+    expect(JSON.parse(await fs.readFile(join(root, 'package.json'), 'utf8')).version).toBe('0.3.0')
+    await expect(fs.stat(join(root, 'lib'))).rejects.toMatchObject({ code: 'ENOENT' })
+    updater.dispose()
+  })
   it('rejects a symlink target without modifying package or outside files', async () => {
     const { root, data, dir, updater } = await fixture()
     const outside = join(dir, 'outside')
@@ -160,5 +198,23 @@ describe('update payload security', () => {
   it('validates configuration independently without network calls', () => {
     expect(validateUpdateConfig({ registryOrigin: 'https://registry.example/' }, configured).registryOrigin).toBe('https://registry.example')
     expect(() => validateUpdateConfig({ unknown: true }, configured)).toThrow('Unknown update option')
+  })
+  it('restores replaced files and removes newly added files on a write failure', async () => {
+    const { root, data, updater } = await fixture()
+    await fs.mkdir(join(root, 'lib'))
+    await fs.writeFile(join(root, 'lib/index.js'), 'old host')
+    const realRename = fs.rename.bind(fs)
+    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (source, target) => {
+      if (String(target).endsWith('cordis.patch.yml')) throw new Error('simulated write failure')
+      await realRename(source, target)
+    })
+    try {
+      const valid = archive()
+      await expect(installUpdate(root, data, extractUpdate(valid.tarball, valid.integrity, '0.2.0'))).rejects.toThrow('simulated write failure')
+      expect(await fs.readFile(join(root, 'lib/index.js'), 'utf8')).toBe('old host')
+      await expect(fs.stat(join(root, 'lib/client.js'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(JSON.parse(await fs.readFile(join(root, 'package.json'), 'utf8')).version).toBe('0.1.0')
+      await expect(fs.stat(join(data, 'update.lock'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { rename.mockRestore(); updater.dispose() }
   })
 })

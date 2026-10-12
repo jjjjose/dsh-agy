@@ -1,6 +1,14 @@
 {
   "name": "dsh-agy",
   "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jjjjose/dsh-agy.git"
+  },
+  "homepage": "https://github.com/jjjjose/dsh-agy#readme",
+  "bugs": {
+    "url": "https://github.com/jjjjose/dsh-agy/issues"
+  },
   "description": "Google Antigravity (Cloud Code Assist) LLM Provider plugin for DeepSeek Harness. Sign in with your Google account and use Gemini / Claude / GPT-OSS from your Antigravity Coding Plan. Multi-platform (Windows, macOS, Linux).",
   "keywords": [
     "deepseek",
@@ -33,6 +41,8 @@
     "docs/INSTALL.md",
     "docs/ARCHITECTURE.md",
     "docs/VALIDATION.md",
+    "docs/SELF_UPDATE.md",
+    "docs/TUTORIAL.es.md",
     "LICENSE"
   ],
   "scripts": {

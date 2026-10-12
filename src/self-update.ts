@@ -91,6 +91,7 @@ export function createSelfUpdater(options: {
   let timer: ReturnType<typeof setTimeout> | undefined
   let checkPending: Promise<UpdateStatus> | undefined
   let installPending: Promise<UpdateStatus> | undefined
+  let installingManually = false
   let configPending = Promise.resolve()
   const controllers = new Set<AbortController>()
 
@@ -162,7 +163,12 @@ export function createSelfUpdater(options: {
   }
   function update(manual = true): Promise<UpdateStatus> {
     if (!manual && (!config.enabled || !config.registryOrigin || pageVisited || !allowed || disposed)) return Promise.resolve(status())
-    installPending ??= run(true, manual).finally(() => { installPending = undefined })
+    // An explicit install must not inherit a skipped background check's result.
+    if (manual && installPending && !installingManually) return installPending.then(() => update(true))
+    if (!installPending) {
+      installingManually = manual
+      installPending = run(true, manual).finally(() => { installPending = undefined; installingManually = false })
+    }
     return installPending
   }
   function schedule(): void {

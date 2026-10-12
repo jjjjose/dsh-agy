@@ -1,4 +1,4 @@
-# dsh-agy
+# dsh-agy — Google Antigravity para DeepSeek Harness
 
 **Google Antigravity (Cloud Code Assist) LLM provider plugin for [DeepSeek Harness](https://github.com/deepseek-ai).**
 
@@ -20,17 +20,123 @@ Sign in with your Google account and use the models from your **Antigravity Codi
 
 ## Install
 
-### DeepSeek Desktop (recommended)
+### Requisitos
 
-1. Open **Plugins → Add plugin**.
-2. Add this package (from a local folder, a git URL, or npm once published).
-3. The prebuilt `lib/` is committed, so there is **no build step**.
-4. Open **Plugins → Google Antigravity** and click **Conectar con Google**.
-5. Complete authorization, then select a model under **Google Antigravity** in the conversation model picker.
+- **DeepSeek Harness 0.2.1-alpha.2**, versión objetivo actual de las dependencias del host.
+- Cuenta Google con acceso a **Antigravity** e Internet para autorizarla.
+- `pnpm` disponible para el instalador de plugins de DSH. Si el instalador no lo encuentra, instala pnpm siguiendo su documentación y reinicia DSH.
 
-The settings page provides an authorization link if the browser blocks the popup, account activation/removal, quota queries, model refresh and runtime activity. Follow [`docs/VALIDATION.md`](docs/VALIDATION.md) to check the complete flow in your installed DSH version.
+No necesitas una API key, copiar tokens de OpenCode ni crear un cliente OAuth propio. La disponibilidad de modelos depende de tu cuenta. Estado: **developer preview**; la compatibilidad de ejecución se debe comprobar en tu DSH.
 
-See [`docs/INSTALL.md`](docs/INSTALL.md) for details, including the CLI `web` profile.
+### DeepSeek Harness Desktop — recomendado
+
+1. Abre **Plugins → Añadir plugin / Add plugin**.
+2. Introduce la dirección del repositorio:
+
+   ```text
+   https://github.com/jjjjose/dsh-agy
+   ```
+
+   Para probar cambios locales aún no publicados en GitHub, introduce la **ruta absoluta de la carpeta raíz**, no `src/` ni `lib/`. En este equipo:
+
+   ```text
+   /Users/ign/Documents/projects/dsh-agy
+   ```
+
+3. Espera a que termine la instalación.
+4. **Cierra completamente DSH y vuelve a abrirlo**. Refrescar la página no basta para recargar el servidor del plugin.
+5. Abre **Plugins → Google Antigravity** y pulsa **Conectar con Google**.
+6. Autoriza la cuenta en el navegador. Si no se abre, utiliza el enlace alternativo mostrado en el plugin.
+7. Cuando la cuenta aparezca conectada, selecciona **Google Antigravity** y un modelo en el selector de la conversación.
+
+Los bundles de `lib/` se incluyen en el paquete: **no necesitas compilar para instalar una copia ya construida**. Una instalación por carpeta puede quedar enlazada a ella; no la muevas ni borres mientras la uses.
+
+**Repositorio oficial:** [jjjjose/dsh-agy](https://github.com/jjjjose/dsh-agy). La instalación desde GitHub usa lo que esté publicado allí, no los cambios pendientes de tu copia local. No se ha confirmado una publicación npm: no instales por nombre hasta verificarla.
+
+### Web / CLI — no usar para el perfil Desktop
+
+Si ya tienes el comando `dsh`, instala en el mismo perfil que utilizas para Web. Sustituye la ruta por la de tu copia:
+
+```sh
+dsh plugin --profile web add https://github.com/jjjjose/dsh-agy
+```
+
+Reinicia el proceso DSH de ese perfil. También puedes usar **Plugins → Añadir plugin** desde su interfaz Web.
+
+El perfil `desktop` lo administra la aplicación: **instala y desinstala desde Desktop, no con `dsh plugin --profile desktop`**. Los comandos anteriores no instalan DSH ni publican el paquete.
+
+Para desarrollo o instalación por copia local:
+
+```sh
+git clone https://github.com/jjjjose/dsh-agy.git
+cd dsh-agy
+```
+
+Instala esa carpeta desde Desktop, o pasa su ruta absoluta a `dsh plugin --profile web add`. No requiere compilación si el repositorio incluye los bundles actualizados.
+
+### Primera prueba: texto y herramientas
+
+1. Envía «Hola» y comprueba la respuesta incremental.
+2. Pregunta «¿Qué archivos hay en este proyecto?» y comprueba llamadas como `working_directory` o `glob`, resultados y respuesta final.
+3. Continúa la conversación para verificar el historial de herramientas.
+
+Una respuesta de texto correcta no demuestra que las herramientas funcionen. [Lista completa de validación](docs/VALIDATION.md).
+
+### Cuentas y herramientas del agente
+
+En la ficha del plugin puedes conectar otra cuenta, activar una cuenta, eliminarla o **Desconectar todas**. También encontrarás **Consultar cuotas**, **Actualizar modelos** y **Consultar actividad**.
+
+| Herramienta registrada | Uso |
+| --- | --- |
+| `antigravity_quota` | Consultar límites de Google; ventanas de cinco horas y semanal cuando el servicio las informa. |
+| `antigravity_stats` | Consultar actividad de la instancia actual, sin tokens. |
+| `google_search` | Buscar y analizar URLs mediante una petición independiente a Google, con fuentes. |
+
+Ejemplos: «Consulta la cuota de Antigravity» o «Busca la documentación oficial de TypeScript y cita las fuentes». DSH decide la exposición según la política y modo de herramientas del agente. El plugin **no cambia tu agente predeterminado ni sustituye automáticamente `web_search`**; búsqueda y generación pueden consumir cuota.
+
+### Actualización y reinstalación
+
+**Actualizar modelos** actualiza el catálogo, no el código del plugin. Para la actualización automática configurable del paquete, consulta [configuración y límites de seguridad](docs/SELF_UPDATE.md). No configura por sí sola un origen de publicación confiable ni implica que ya exista una versión descargable.
+
+Si actualizas el código fuente de una copia local, ejecuta desde su raíz:
+
+```sh
+npm ci --ignore-scripts
+npm run typecheck
+npm test
+npm run build
+npm run smoke
+```
+
+Reinicia DSH después. Si instaló una copia en vez de un enlace, reinstala la carpeta actualizada. No borres las cuentas para actualizar el código.
+
+### Desinstalar
+
+En Desktop, desinstala desde **Plugins** y reinicia DSH. Para retirar también las cuentas gestionadas, pulsa **Desconectar todas** antes de desinstalar. Desinstalar no garantiza borrar los datos persistentes.
+
+Solo para el perfil CLI/Web:
+
+```sh
+dsh plugin --profile web remove dsh-agy
+```
+
+### Errores frecuentes
+
+| Síntoma | Qué hacer |
+| --- | --- |
+| Incompatible con DSH | Comprueba versión del host y del paquete; no ignores la advertencia para forzar la carga. |
+| No aparece el botón | Instala la raíz del paquete y reinicia completamente DSH; comprueba aplicación/perfil. |
+| Google no se abre | Usa el enlace alternativo y verifica el bloqueo de ventanas. |
+| Callback `51121` ocupado | Cancela otros intentos de autorización antes de reintentar. |
+| Cuenta revocada | Elimínala del plugin y vuelve a autorizarla. |
+| Faltan modelos | Comprueba la conexión y pulsa Actualizar modelos; revisa acceso de la cuenta y red. |
+| `PI_AI_ERROR` | Reproduce el fallo y abre Consultar actividad; comparte «Último fallo», modelo y pasos mínimos. |
+| Texto funciona, herramientas fallan | Comprueba que instalaste los bundles más recientes y reproduce una llamada de herramientas. |
+| Tras actualizar sigue igual | Verifica carpeta instalada, bundles regenerados y reinicio de DSH. |
+
+Para reportar errores, incluye versión de DSH, sistema operativo y forma de instalación. **No compartas tokens, `accounts.json`, cabeceras Authorization ni URLs completas de OAuth.** Los archivos de sesión pueden incluir prompts, rutas y datos privados.
+
+Más detalles: [tutorial en español](docs/TUTORIAL.es.md), [instalación](docs/INSTALL.md) y [validación](docs/VALIDATION.md).
 
 ### Models
 
@@ -92,3 +198,9 @@ npm run smoke          # structural check that lib/ is loadable by the Harness
 ## License
 
 [MIT](./LICENSE)
+# Package self-update
+
+Optional automatic **plugin** updates are disabled until a trusted npm HTTPS
+registry origin is explicitly configured. The settings page provides status,
+check-only, confirmed installation, and persistent mode/interval controls.
+See [self-update configuration and safety limits](docs/SELF_UPDATE.md).

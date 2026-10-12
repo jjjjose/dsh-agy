@@ -65,9 +65,10 @@ Dependencies and peer dependencies must remain unchanged; updates requiring new
 dependencies need manual installation. No shell, npm commands or lifecycle scripts
 are executed. Some otherwise valid npm archives therefore require manual install.
 
-A exclusive `update.lock` serializes package writes across processes; unique backup
+An exclusive `update.lock` serializes package writes across processes; unique backup
 directories in the plugin state directory retain replaced files. Replacement uses
-per-file atomic rename and restores original files on caught write failures. The
+per-file atomic rename (manifest last), rechecks package identity/version under
+the lock to prevent racing downgrades, and restores original files on caught write failures. The
 whole package is **not** crash-atomic: a process kill/power failure may require
 manual recovery from the backup. A stale lock after a crash must be removed only
 after verifying no updater is running. There is no automatic restart, automatic

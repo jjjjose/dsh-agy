@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { gunzipSync } from 'node:zlib'
 
-const FILES = new Set(['package.json', 'lib/index.js', 'lib/client.js', 'cordis.patch.yml', 'README.md', 'docs/INSTALL.md', 'docs/ARCHITECTURE.md', 'docs/VALIDATION.md', 'LICENSE'])
+const FILES = new Set(['package.json', 'lib/index.js', 'lib/client.js', 'cordis.patch.yml', 'README.md', 'docs/INSTALL.md', 'docs/ARCHITECTURE.md', 'docs/VALIDATION.md', 'docs/SELF_UPDATE.md', 'LICENSE'])
 export interface PayloadFile { path: string; data: Buffer }
 
 export function extractUpdate(tarball: Buffer, integrity: string, version: string): PayloadFile[] {
@@ -68,7 +68,23 @@ export async function installUpdate(root: string, dataDir: string, files: Payloa
   const lock = await fs.open(lockPath, 'wx', 0o600)
   const backup = join(dataDir, `update-backup-${randomUUID()}`)
   const touched: Array<{ target: string; original?: Buffer }> = []
+  const written = new Set<string>()
   try {
+    // Recheck identity/version under the cross-process lock, not just before download.
+    const incoming = JSON.parse(files.find((file) => file.path === 'package.json')!.data.toString('utf8')) as { name?: unknown; version?: unknown }
+    const installed = JSON.parse(await fs.readFile(await safeTarget(root, 'package.json'), 'utf8')) as { name?: unknown; version?: unknown }
+    if (incoming.name !== 'dsh-agy' || installed.name !== 'dsh-agy') throw new Error('identity-mismatch')
+    const parts = (version: unknown) => {
+      if (typeof version !== 'string' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) throw new Error('invalid-version')
+      const values = version.split('.').map(Number)
+      if (!values.every(Number.isSafeInteger)) throw new Error('invalid-version')
+      return values
+    }
+    const next = parts(incoming.version), previous = parts(installed.version)
+    const different = next.findIndex((part, index) => part !== previous[index])
+    if (different === -1 || next[different]! < previous[different]!) throw new Error('package-version-changed')
+    // Manifest is the final commit marker (each individual rename is atomic).
+    files = [...files].sort((left, right) => Number(left.path === 'package.json') - Number(right.path === 'package.json'))
     const targets = await Promise.all(files.map((file) => safeTarget(root, file.path)))
     await fs.mkdir(backup, { mode: 0o700 })
     for (let index = 0; index < files.length; index++) {
@@ -87,11 +103,12 @@ export async function installUpdate(root: string, dataDir: string, files: Payloa
       const target = targets[index]!
       await fs.mkdir(dirname(target), { recursive: true })
       const temp = `${target}.update-${randomUUID()}`
-      try { await fs.writeFile(temp, files[index]!.data, { flag: 'wx', mode: 0o644 }); await fs.rename(temp, target) }
+      try { await fs.writeFile(temp, files[index]!.data, { flag: 'wx', mode: 0o644 }); await fs.rename(temp, target); written.add(target) }
       finally { await fs.rm(temp, { force: true }) }
     }
   } catch (error) {
     for (const entry of touched) {
+      if (!written.has(entry.target)) continue
       if (entry.original) await fs.writeFile(entry.target, entry.original)
       else await fs.rm(entry.target, { force: true })
     }
