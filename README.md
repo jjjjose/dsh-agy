@@ -197,6 +197,8 @@ npm run smoke          # structural check that lib/ is loadable by the Harness
 
 ## License
 
+Historial de versiones: [CHANGELOG.md](CHANGELOG.md).
+
 [MIT](./LICENSE)
 # Package self-update
 
