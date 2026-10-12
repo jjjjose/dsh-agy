@@ -52,7 +52,12 @@ async function rpc<T>(method: string, args?: Record<string, unknown>, signal?: A
       cache: 'no-store',
     })
     const body = await response.json() as T & { error?: string }
-    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+    if (!response.ok) {
+      if (response.status === 404 && method.startsWith('update/')) {
+        throw new Error('El servidor no reconoce la ruta de actualización (HTTP 404). Cierra completamente DeepSeek Harness y vuelve a abrirlo. Si persiste, reinstala dsh-agy desde la carpeta actualizada: la interfaz y el servidor pueden ser de versiones diferentes.')
+      }
+      throw new Error(body.error || `HTTP ${response.status}`)
+    }
     return body
   } finally {
     window.clearTimeout(timeout)
@@ -316,24 +321,30 @@ function PackageUpdates(): React.ReactElement {
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
   const lifetime = React.useRef<AbortController | null>(null)
+  const [loading, setLoading] = React.useState(true)
   React.useEffect(() => {
     const controller = new AbortController()
     lifetime.current = controller
     rpc<UpdateStatus>('update/status', undefined, controller.signal).then((result) => {
       if (!controller.signal.aborted) { setState(result); setOrigin(result.registryOrigin); setMinutes(String(result.intervalMs / 60000)) }
     }).catch((error: Error) => { if (!controller.signal.aborted) setError(error.message) })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
   }, [])
   const action = (method: string, body: Record<string, unknown> = {}) => {
     if (busy) return
     setBusy(true); setError('')
     rpc<UpdateStatus>(method, body, lifetime.current?.signal).then((result) => {
-      if (!lifetime.current?.signal.aborted) setState(result)
+      if (!lifetime.current?.signal.aborted) {
+        setState(result)
+        setOrigin(result.registryOrigin)
+        setMinutes(String(result.intervalMs / 60000))
+      }
     }).catch((error: Error) => { if (!lifetime.current?.signal.aborted) setError(error.message) })
       .finally(() => { if (!lifetime.current?.signal.aborted) setBusy(false) })
   }
   return <div className="agy-page">
-    <Row title="Actualización del plugin" desc={state ? `En ejecución: ${state.runningVersion} · Disco: ${state.diskVersion}${state.latest ? ` · Última versión: ${state.latest}` : ''}` : 'Consultando versión…'} controls={<Button disabled={busy || !state?.configured} onClick={() => action('update/check')}>Comprobar actualización</Button>} />
+    <Row title="Actualización del plugin" desc={state ? `En ejecución: ${state.runningVersion} · Disco: ${state.diskVersion}${state.latest ? ` · Última versión: ${state.latest}` : ''}` : loading ? 'Consultando versión…' : 'No se pudo consultar la versión del servidor.'} controls={<Button disabled={loading || busy || (state !== null && !state.configured)} onClick={() => action(state ? 'update/check' : 'update/status')}>{state ? 'Comprobar actualización' : 'Reintentar conexión'}</Button>} />
     {state ? <>
       <p className="agy-note">{!state.configured ? 'Origen no configurado. No se descargará ningún paquete hasta que confirmes un registro npm HTTPS de confianza que publique dsh-agy.' : state.pendingRestart ? 'La versión del disco cambió. Reinicia Harness para aplicarla.' : state.available ? 'Hay una versión nueva disponible.' : state.lastCheckAt ? 'No hay una versión más reciente disponible.' : 'Aún no se ha comprobado el origen.'}</p>
       {!state.installAllowed ? <p className="agy-note">La instalación automática solo está permitida dentro de profiles de DSH; no se modifica una copia de desarrollo.</p> : null}
