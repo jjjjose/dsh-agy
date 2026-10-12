@@ -75,6 +75,13 @@ describe('dynamic model grouping and effort routing', () => {
     expect(high.request).toMatchObject({ generationConfig: { thinkingConfig: { thinkingLevel: 'high' } } })
   })
 
+  it.each([undefined, []])('disables undeclared function calls when tools are absent (%s)', (tools) => {
+    const model = parseAvailableModels({ models: { 'gemini-9.2-flash-high': {} } })[0]!
+    const envelope = buildEnvelope(model, { systemPrompt: 'Use bash if needed.', messages: [], tools }, {}, 'p')
+    expect(envelope.request).toMatchObject({ toolConfig: { functionCallingConfig: { mode: 'NONE' } } })
+    expect((envelope.request as any).tools).toBeUndefined()
+  })
+
   it('routes Claude thinking via budgets and off via the plain route', () => {
     const model = parseAvailableModels({ models: { 'claude-sonnet-5-1-thinking': { maxOutputTokens: 64000 }, 'claude-sonnet-5-1': { maxOutputTokens: 64000 } } })[0]!
     expect(model.name).toBe('Claude Sonnet 5.1')

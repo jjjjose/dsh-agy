@@ -78,6 +78,13 @@ declare module '@deepseek-ai/dsh-llm-pi-ai' {
   export class PiAiAdapter {
     constructor(options: PiAiAdapterOptions)
     listModels(provider: string): Promise<Array<{ provider: string; id: string; name: string; inputModalities: string[] }>>
+    /** Dispatch used by direct streams and frozen prepareCall() streams. */
+    streamWithSnapshot(options: {
+      provider: string
+      model: string
+      tools?: Array<{ name: string; description: string; parameters: Record<string, unknown>; deferLoading?: boolean }>
+      [key: string]: unknown
+    }, snapshot: unknown): AsyncGenerator<unknown>
   }
 }
 

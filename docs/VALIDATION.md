@@ -59,6 +59,8 @@ Las pruebas automatizadas cubren nuevas versiones ficticias, agrupación, alias,
 
 ### Regresión de `MALFORMED_FUNCTION_CALL`
 
+Si aparece `toolCount=0` y Gemini intenta llamar a `bash`, comprobar el evento `adapter-tools`: registra la cantidad recibida de DSH y cuántas declaraciones llevaban `deferLoading`, sin registrar nombres ni esquemas. El adaptador entrega esas declaraciones explícitamente al protocolo de Antigravity; no recupera herramientas ausentes del request. Si también `adapter-tools` indica cero, revisar la presentación/habilitación de herramientas del agente en DSH. En solicitudes realmente sin herramientas, el transporte envía `functionCallingConfig.mode=NONE` para impedir llamadas a funciones no declaradas.
+
 En sesiones nuevas con `gemini-3.8-flash` y effort High, si están disponibles, repetir el mismo prompt con herramientas básicas, con cada MCP por separado y con el catálogo completo. Verificar una llamada válida, su resultado y una segunda llamada en la misma conversación. Repetir con Claude si está disponible.
 
 El error de generación conserva el `finishMessage` del backend cuando existe; puede contener argumentos generados, por lo que debe revisarse y redactarse antes de compartirlo. Las estadísticas solo guardan modelo, motivo, tipo de diagnóstico y cantidad de herramientas, no ese mensaje ni el esquema.

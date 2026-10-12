@@ -144,6 +144,10 @@ export function buildEnvelope(
         throw new ToolSchemaError(tool.name, error instanceof SchemaConversionError ? error.schemaPath : undefined, `Tool ${tool.name}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }) }]
+  } else {
+    // Agent instructions/history can mention tools even in a tool-free request.
+    // Do not let the backend attempt undeclared functions in that case.
+    request.toolConfig = { functionCallingConfig: { mode: 'NONE' } }
   }
   return {
     project: projectId,

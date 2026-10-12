@@ -61,6 +61,17 @@ describe('safe opt-in diagnostics', () => {
     expect(logs.snapshot().enabled).toBe(false)
     expect(new Diagnostics('0.1.1', path).snapshot().enabled).toBe(false)
   })
+  it('records adapter tool counts without storing declarations or content', async () => {
+    const logs = new Diagnostics('0.2.0', await directory(), () => 0)
+    await logs.configure(true)
+    logs.record({ event: 'adapter-tools', requestId: 'adapter-test', model: 'gemini-3.8-flash', toolCount: 2,
+      deferredToolCount: 1, tools: [{ name: 'private-tool', parameters: { secret: 'private-schema' } }] } as DiagnosticRecord)
+    expect(logs.snapshot().entries).toEqual([{ time: 0, event: 'adapter-tools', requestId: 'adapter-test', model: 'gemini-3.8-flash', toolCount: 2, deferredToolCount: 1 }])
+    const report = formatDiagnosticReport(logs.snapshot())
+    expect(report).toContain('deferredToolCount=1')
+    expect(report).not.toContain('private-tool')
+    expect(report).not.toContain('private-schema')
+  })
   it('does not change the active preference if persistence fails', async () => {
     const path = join(await directory(), 'not-a-directory')
     await fs.writeFile(path, '')

@@ -187,7 +187,7 @@ export function apply(ctx: DshContext, rawConfig: Config): void {
     resolveApiKey: () => manager.resolveApiKey(),
     auth: { credentials: new InMemoryCredentialStore(), authContext: defaultProviderAuthContext() },
     resolveAttachments: () => ctx.get('attachments'),
-  }, () => new Set(catalog.models().map((model) => model.id)))
+  }, () => new Set(catalog.models().map((model) => model.id)), (entry) => diagnostics.record(entry))
   registration = ctx.llm.registerAdapter([PROVIDER], adapter)
   ctx.effect(() => () => registration?.(), 'dsh-agy: provider registration')
   ctx.effect(() => () => manager.dispose(), 'dsh-agy: account manager')
