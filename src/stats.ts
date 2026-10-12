@@ -1,8 +1,8 @@
 /** Token-free runtime activity shared by inference and the settings RPC. */
 export class EngineStats {
-  private lastDiagnostic?: { model: string; finishReason?: string; kind: string; time: number }
+  private lastDiagnostic?: { model: string; finishReason?: string; kind: string; toolCount?: number; time: number }
 
-  diagnostic(value: { model: string; finishReason?: string; kind: string }): void {
+  diagnostic(value: { model: string; finishReason?: string; kind: string; toolCount?: number }): void {
     this.lastDiagnostic = { ...value, time: Date.now() }
   }
   private readonly accounts = new Map<string, { success: number; rateLimits: number; errors: number }>()

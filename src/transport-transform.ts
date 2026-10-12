@@ -18,18 +18,72 @@ export function resolveWireModel(id: string): { id: string; thinking?: Record<st
 const SCHEMA_KEYS = new Set(['type', 'description', 'properties', 'required', 'items', 'enum', 'nullable', 'anyOf', 'format', 'minimum', 'maximum', 'minItems', 'maxItems'])
 
 /** Remove unsupported JSON Schema keywords without interpreting property names as keywords. */
-export function cleanSchema(value: unknown, uppercase = false): unknown {
+export function cleanSchema(value: unknown, uppercase = false, root: unknown = value, path = '#', refs: string[] = [], allowNull = false): unknown {
+  const child = (schema: unknown, location: string, unionBranch = false): unknown => cleanSchema(schema, uppercase, root, location, refs, unionBranch)
+  const fail = (message: string): never => { throw new Error(`Unsupported tool schema at ${path}: ${message}`) }
+  if (value === false) return fail('false schemas cannot be represented')
+  if (value === true) return {}
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
   const source = value as Record<string, unknown>
+  if ('$ref' in source) {
+    const ref = source.$ref
+    if (typeof ref !== 'string' || !ref.startsWith('#/')) return fail('only local JSON Pointer references are supported')
+    if (refs.includes(ref)) return fail('recursive references cannot be represented')
+    let target: unknown = root
+    for (const segment of ref.slice(2).split('/')) {
+      const key = segment.replace(/~1/g, '/').replace(/~0/g, '~')
+      if (typeof target !== 'object' || target === null || !Object.hasOwn(target, key)) return fail('unresolved local reference')
+      target = (target as Record<string, unknown>)[key]
+    }
+    const resolved = cleanSchema(target, uppercase, root, path, [...refs, ref], allowNull)
+    const { $ref: _, ...siblings } = source
+    if (Object.keys(siblings).some((key) => !['description', '$comment', 'title', '$defs', 'definitions', '$schema', '$id'].includes(key))) return fail('reference siblings with validation constraints cannot be represented')
+    return { ...resolved as Record<string, unknown>, ...typeof siblings.description === 'string' ? { description: siblings.description } : {} }
+  }
+  for (const key of ['allOf', 'not', 'if', 'then', 'else', '$dynamicRef']) {
+    if (key in source) return fail(`${key} cannot be represented safely`)
+  }
   const result: Record<string, unknown> = {}
+  if (Array.isArray(source.type) && ('anyOf' in source || 'oneOf' in source)) return fail('combined type unions and alternatives cannot be represented safely')
   for (const [key, item] of Object.entries(source)) {
     if (!SCHEMA_KEYS.has(key)) continue
     if (key === 'properties' && typeof item === 'object' && item !== null) {
-      result[key] = Object.fromEntries(Object.entries(item).map(([name, schema]) => [name, cleanSchema(schema, uppercase)]))
-    } else if (key === 'items') result[key] = cleanSchema(item, uppercase)
-    else if (key === 'anyOf' && Array.isArray(item)) result[key] = item.map((schema) => cleanSchema(schema, uppercase))
+      result[key] = Object.fromEntries(Object.entries(item).map(([name, schema]) => [name, child(schema, `${path}/properties/${name.replace(/~/g, '~0').replace(/\//g, '~1')}`)]))
+    } else if (key === 'items') {
+      if (Array.isArray(item)) return fail('tuple items cannot be represented')
+      result[key] = child(item, `${path}/items`)
+    }
+    else if (key === 'anyOf' && Array.isArray(item)) result[key] = item.map((schema, index) => child(schema, `${path}/anyOf/${index}`, true))
     else if (key === 'type' && typeof item === 'string') result[key] = uppercase ? item.toUpperCase() : item
+    else if (key === 'type' && Array.isArray(item)) {
+      if (!item.length || item.some((type) => typeof type !== 'string')) return fail('invalid type union')
+      result.anyOf = item.map((type) => child({ type }, `${path}/type`, true))
+    }
     else result[key] = item
+  }
+  // Protobuf Schema has anyOf, not oneOf. Preserve the alternatives while
+  // relaxing exclusivity; the harness remains responsible for input validation.
+  if (Array.isArray(source.oneOf)) {
+    if (result.anyOf !== undefined) return fail('combined oneOf and anyOf cannot be represented safely')
+    result.anyOf = source.oneOf.map((schema, index) => child(schema, `${path}/oneOf/${index}`, true))
+  }
+  if (Array.isArray(result.anyOf)) {
+    const alternatives = result.anyOf as Record<string, unknown>[]
+    if (!alternatives.length) return fail('empty union cannot be represented')
+    const nonNull = alternatives.filter((schema) => typeof schema.type !== 'string' || schema.type.toLowerCase() !== 'null')
+    if (nonNull.length !== alternatives.length) {
+      if (!nonNull.length) return fail('null-only unions cannot be represented')
+      result.nullable = true
+      if (nonNull.length === 1) {
+        delete result.anyOf
+        Object.assign(result, nonNull[0])
+      } else result.anyOf = nonNull
+    }
+  }
+  if (typeof result.type === 'string' && result.type.toLowerCase() === 'null') {
+    // Kept temporarily for the parent union to normalize into nullable.
+    if (!allowNull) return fail('null-only schemas cannot be represented')
+    return result
   }
   if ('const' in source) result.enum = [source.const]
   if (Array.isArray(result.required)) {

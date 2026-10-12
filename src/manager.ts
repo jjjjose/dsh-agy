@@ -316,7 +316,7 @@ export class AccountManager {
     this.health.failure(accountId)
   }
 
-  reportDiagnostic?: (diagnostic: { model: string; finishReason?: string; kind: string }) => void
+  reportDiagnostic?: (diagnostic: { model: string; finishReason?: string; kind: string; toolCount?: number }) => void
 
   /** Get a distinct account's auth after `accountId` was rate-limited. */
   async afterRateLimit(accountId: string): Promise<RequestAuth | undefined> {

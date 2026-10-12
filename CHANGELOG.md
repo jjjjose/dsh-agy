@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Corregido
+
+- Esquemas de herramientas: conservar alternativas de `oneOf` mediante `anyOf`, normalizar uniones anulables y resolver referencias locales antes de eliminar definiciones. La conversión no modifica el catálogo original.
+- Informar herramienta y ubicación para referencias no resolubles, recursión y composiciones que no pueden representarse de forma segura, en lugar de eliminar sus restricciones silenciosamente.
+- Incluir `finishMessage` del backend en el error de generación (limitado a 1000 caracteres), sin persistirlo en las estadísticas. Los diagnósticos de conversión y finalización incluyen la cantidad de herramientas.
+
+### Validación y límites
+
+- Pruebas con un catálogo sintético de 135 herramientas para Gemini y Claude; no equivalen a una reproducción contra Google real.
+- Se conserva el campo protobuf `parameters`; no se presupone que Cloud Code Assist admita `parametersJsonSchema`.
+- `oneOf` se aproxima con `anyOf`: conserva las alternativas, pero no la exclusividad. La validación original de entradas sigue siendo responsabilidad del host.
+
 ## 0.1.1 — 2026-10-12
 
 ### Añadido

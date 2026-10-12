@@ -2,6 +2,29 @@ import { describe, expect, it } from 'vitest'
 import { cleanContents, cleanSchema } from '../src/transport-transform.ts'
 
 describe('transport schema normalization', () => {
+  it('preserves schedule_create oneOf alternatives as anyOf', () => {
+    expect(cleanSchema({ oneOf: [{ type: 'string' }, { type: 'object', properties: { date: { type: 'string' }, time: { type: 'string' }, time_zone: { type: 'string' } }, required: ['date', 'time', 'time_zone'] }] }, true)).toEqual({
+      anyOf: [{ type: 'STRING' }, { type: 'OBJECT', properties: { date: { type: 'STRING' }, time: { type: 'STRING' }, time_zone: { type: 'STRING' } }, required: ['date', 'time', 'time_zone'] }],
+    })
+  })
+  it('normalizes nullable types and nullable union branches', () => {
+    expect(cleanSchema({ type: ['string', 'null'] }, true)).toEqual({ type: 'STRING', nullable: true })
+    expect(cleanSchema({ anyOf: [{ type: 'integer' }, { type: 'null' }] })).toEqual({ type: 'integer', nullable: true })
+  })
+  it('resolves nested local references before stripping definitions', () => {
+    const schema = { $defs: { 'a/b': { type: 'object', properties: { value: { type: 'string' } } } }, type: 'object', properties: { item: { $ref: '#/$defs/a~1b', description: 'An item' } } }
+    const before = JSON.stringify(schema)
+    expect(cleanSchema(schema, true)).toEqual({ type: 'OBJECT', properties: { item: { type: 'OBJECT', properties: { value: { type: 'STRING' } }, description: 'An item' } } })
+    expect(JSON.stringify(schema)).toBe(before)
+  })
+  it('rejects unsupported and recursive schemas with their location', () => {
+    expect(() => cleanSchema({ properties: { item: { allOf: [{ type: 'string' }] } } })).toThrow('#/properties/item')
+    expect(() => cleanSchema({ $defs: { node: { $ref: '#/$defs/node' } }, $ref: '#/$defs/node' })).toThrow('recursive')
+    expect(() => cleanSchema({ $ref: '#/$defs/missing' })).toThrow('unresolved')
+    expect(() => cleanSchema({ $ref: 'https://example.com/schema' })).toThrow('only local')
+    expect(() => cleanSchema({ type: 'null' })).toThrow('null-only')
+    expect(() => cleanSchema({ type: ['string'], anyOf: [{ type: 'integer' }] })).toThrow('combined type unions')
+  })
   it('adds missing array items and filters invalid required properties recursively', () => {
     expect(cleanSchema({ type: 'object', properties: { paths: { type: 'array' } }, required: ['paths', 'missing'] }, true)).toEqual({
       type: 'OBJECT', properties: { paths: { type: 'ARRAY', items: { type: 'STRING' } } }, required: ['paths'],

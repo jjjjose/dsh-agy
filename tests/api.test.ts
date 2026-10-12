@@ -36,6 +36,25 @@ describe('parseRequestAuth', () => {
 })
 
 describe('buildEnvelope', () => {
+  it('preserves a large MCP-like catalog including unions and local references for both model families', () => {
+    const catalog: Tool[] = [...tools,
+      { name: 'schedule_create', description: 'Schedule', parameters: { type: 'object', properties: { at: { oneOf: [{ type: 'string' }, { type: 'object', properties: { date: { type: 'string' } }, required: ['date'] }] } } } },
+      { name: 'mcp__playwright__browser_emulate_media', description: 'Media', parameters: { type: 'object', properties: { colorScheme: { anyOf: [{ type: 'string', enum: ['light', 'dark'] }, { type: 'null' }] } } } },
+      { name: 'referenced', description: 'References', parameters: { $defs: { input: { type: 'string' } }, type: 'object', properties: { query: { $ref: '#/$defs/input' } } } },
+      ...Array.from({ length: 130 }, (_, index) => ({ ...tools[1]!, name: `mcp__catalog__tool_${index}` })),
+    ]
+    const before = JSON.stringify(catalog)
+    for (const selected of [model, maintainedModels.find((entry) => entry.id.startsWith('claude-')) as Model<AntiGravityApi>]) {
+      const request = buildEnvelope(selected, { messages: [], tools: catalog }, {}, 'p').request as { tools: Array<{ functionDeclarations: Array<{ name: string; parameters: { properties: Record<string, unknown> } }> }> }
+      const declarations = request.tools[0]!.functionDeclarations
+      expect(declarations.map((entry) => entry.name)).toEqual(catalog.map((entry) => entry.name))
+      expect(declarations[2]!.parameters.properties.at).toHaveProperty('anyOf')
+      expect(declarations[3]!.parameters.properties.colorScheme).toHaveProperty('nullable', true)
+      expect(declarations[4]!.parameters.properties.query).toHaveProperty('type', selected === model ? 'STRING' : 'string')
+    }
+    expect(JSON.stringify(catalog)).toBe(before)
+  })
+
   it('uses protobuf parameters for Gemini tools, including no-argument tools', () => {
     const before = JSON.stringify(tools)
     const request = buildEnvelope(model, { messages: [], tools }, {}, 'p').request as Record<string, unknown>
@@ -109,6 +128,16 @@ describe('tool transport', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new ReadableStream({ start(controller) { controller.enqueue(encoded); controller.close() } }), { status: 200 })))
   }
 
+  it('reports incompatible schemas before sending a request without storing schema contents', async () => {
+    const fetcher = vi.fn()
+    vi.stubGlobal('fetch', fetcher)
+    const auth = provider()
+    const message = await streamAntiGravity(model, { messages: [], tools: [{ name: 'bad_tool', description: 'Bad', parameters: { type: 'object', properties: { input: { allOf: [{ type: 'string' }] } } } }] }, { apiKey: JSON.stringify({ token: 'fake', projectId: 'p' }) }, auth).result()
+    expect(message.errorMessage).toContain('Tool bad_tool: Unsupported tool schema at #/properties/input')
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(auth.reportDiagnostic).toHaveBeenCalledWith({ model: model.id, kind: 'request-conversion-error', toolCount: 1 })
+  })
+
   it('retains text signatures supplied in a later SSE frame for Gemini history', async () => {
     mockResponse([
       { candidates: [{ content: { parts: [{ text: 'answer' }] } }] },
@@ -144,13 +173,14 @@ describe('tool transport', () => {
   })
 
   it('keeps usage and diagnostic finishReason on generation errors', async () => {
-    mockResponse([{ candidates: [{ content: { parts: [{ text: '' }] }, finishReason: 'MALFORMED_FUNCTION_CALL' }], usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 2, thoughtsTokenCount: 3, totalTokenCount: 25 } }])
+    mockResponse([{ candidates: [{ content: { parts: [{ text: '' }] }, finishReason: 'MALFORMED_FUNCTION_CALL', finishMessage: 'Invalid call\nCheck arguments' }], usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 2, thoughtsTokenCount: 3, totalTokenCount: 25 } }])
     const auth = provider()
     const message = await streamAntiGravity(model, { messages: [], tools }, { apiKey: JSON.stringify({ token: 'fake', projectId: 'p', accountId: 'a' }) }, auth).result()
     expect(message.stopReason).toBe('error')
     expect(message.errorMessage).toContain('MALFORMED_FUNCTION_CALL')
+    expect(message.errorMessage).toContain('Invalid call Check arguments')
     expect(message.usage).toMatchObject({ input: 20, output: 5, totalTokens: 25 })
-    expect(auth.reportDiagnostic).toHaveBeenCalledWith({ model: model.id, finishReason: 'MALFORMED_FUNCTION_CALL', kind: 'generation-finish-error' })
+    expect(auth.reportDiagnostic).toHaveBeenCalledWith({ model: model.id, finishReason: 'MALFORMED_FUNCTION_CALL', kind: 'generation-finish-error', toolCount: 2 })
     expect(auth.reportSuccess).not.toHaveBeenCalled()
   })
 })

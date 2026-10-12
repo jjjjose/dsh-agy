@@ -22,7 +22,7 @@ import type {
   ThinkingContent,
   ToolCall,
 } from '@earendil-works/pi-ai'
-import { convertMessages, convertTools, isThinkingPart, mapStopReasonString, retainThoughtSignature } from '@earendil-works/pi-ai/api/google-shared'
+import { convertMessages, isThinkingPart, mapStopReasonString, retainThoughtSignature } from '@earendil-works/pi-ai/api/google-shared'
 import { ENDPOINTS, antiGravityHeaders } from './constants.ts'
 import type { AntiGravityApi } from './models.ts'
 import { cleanContents, cleanSchema, readSse, resolveWireModel, responseFailure } from './transport-transform.ts'
@@ -41,7 +41,7 @@ export interface AuthProvider {
   reportRateLimit(accountId: string, delay?: number): void
   reportSuccess(accountId: string): void
   reportError?(accountId: string): void
-  reportDiagnostic?(diagnostic: { model: string; finishReason?: string; kind: string }): void
+  reportDiagnostic?(diagnostic: { model: string; finishReason?: string; kind: string; toolCount?: number }): void
 }
 
 interface ResponsePart {
@@ -54,7 +54,7 @@ interface ResponseChunk {
   error?: { message?: string; status?: string }
   response?: {
     responseId?: string
-    candidates?: Array<{ content?: { parts?: ResponsePart[] }; finishReason?: string }>
+    candidates?: Array<{ content?: { parts?: ResponsePart[] }; finishReason?: string; finishMessage?: string }>
     usageMetadata?: {
       promptTokenCount?: number
       candidatesTokenCount?: number
@@ -120,14 +120,15 @@ export function buildEnvelope(
   if (context.tools !== undefined && context.tools.length > 0) {
     // Cloud Code Assist's function declarations use the protobuf Schema field,
     // not the public Gemini API's arbitrary parametersJsonSchema field.
-    request.tools = convertTools(context.tools, true)
-    request.tools = (request.tools as Array<{ functionDeclarations?: Array<Record<string, unknown>> }>).map((tool) => ({
-      ...tool,
-      functionDeclarations: tool.functionDeclarations?.map((declaration) => ({
-        ...declaration,
-        parameters: normalizeToolSchema(declaration.parameters, model.id.startsWith('claude-')),
-      })),
-    }))
+    // Normalize the original schemas: convertTools(..., true) removes $defs
+    // before local references can be resolved.
+    request.tools = [{ functionDeclarations: context.tools.map((tool) => {
+      try {
+        return { name: tool.name, description: tool.description, parameters: normalizeToolSchema(tool.parameters, model.id.startsWith('claude-')) }
+      } catch (error) {
+        throw new Error(`Tool ${tool.name}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }) }]
   }
   return {
     project: projectId,
@@ -165,7 +166,12 @@ async function openResponse(
   let current = auth
   for (let attempt = 0; attempt < 3; attempt++) {
     options.signal?.throwIfAborted()
-    let payload = buildEnvelope(model, context, options, current.projectId)
+    let payload: Record<string, unknown>
+    try { payload = buildEnvelope(model, context, options, current.projectId) }
+    catch (error) {
+      provider.reportDiagnostic?.({ model: model.id, kind: 'request-conversion-error', toolCount: context.tools?.length ?? 0 })
+      throw error
+    }
     const replacement = await options.onPayload?.(payload, model)
     if (replacement != null) payload = replacement as Record<string, unknown>
     const body = JSON.stringify(payload)
@@ -340,8 +346,11 @@ export function streamAntiGravity(
           finishReason = candidate.finishReason
           output.stopReason = mapStopReasonString(candidate.finishReason)
           if (output.stopReason === 'error') {
-            provider.reportDiagnostic?.({ model: model.id, finishReason, kind: 'generation-finish-error' })
-            throw new Error(`Antigravity generation failed: ${finishReason}`)
+            provider.reportDiagnostic?.({ model: model.id, finishReason, kind: 'generation-finish-error', toolCount: context.tools?.length ?? 0 })
+            // Expose the backend explanation in the request error, not persistent
+            // activity diagnostics: it may contain generated arguments.
+            const detail = candidate.finishMessage?.replace(/[\r\n\x00-\x1f]/g, ' ').slice(0, 1000)
+            throw new Error(`Antigravity generation failed: ${finishReason}${detail ? ` (${detail})` : ''}`)
           }
         }
         if (output.content.some((block) => block.type === 'toolCall')) output.stopReason = 'toolUse'
