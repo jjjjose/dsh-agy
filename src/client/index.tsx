@@ -249,9 +249,12 @@ function AntigravityPage(): React.ReactElement {
   }, [])
 
   const showStats = React.useCallback(() => {
-    rpc<{ accounts: Array<{ accountId: string; success: number; rateLimits: number; errors: number }> }>('stats', undefined, lifetimeRef.current?.signal)
+    rpc<{ lastDiagnostic?: { model: string; finishReason?: string; kind: string }; accounts: Array<{ accountId: string; success: number; rateLimits: number; errors: number }> }>('stats', undefined, lifetimeRef.current?.signal)
       .then((result) => {
-        if (activeRef.current) setActivity(result.accounts.map((entry) => `${entry.accountId.slice(0, 8)}: ${entry.success} completadas · ${entry.rateLimits} límites · ${entry.errors} errores`).join('\n') || 'Sin actividad en esta instancia.')
+        if (activeRef.current) setActivity([
+          result.accounts.map((entry) => `${entry.accountId.slice(0, 8)}: ${entry.success} completadas · ${entry.rateLimits} límites · ${entry.errors} errores`).join('\n') || 'Sin actividad en esta instancia.',
+          result.lastDiagnostic ? `Último fallo: ${result.lastDiagnostic.model} · ${result.lastDiagnostic.kind} · finishReason=${result.lastDiagnostic.finishReason ?? 'missing'}` : '',
+        ].filter(Boolean).join('\n'))
       }).catch((error: Error) => { if (activeRef.current) setError(error.message) })
   }, [])
 

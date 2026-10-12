@@ -1,5 +1,10 @@
 /** Token-free runtime activity shared by inference and the settings RPC. */
 export class EngineStats {
+  private lastDiagnostic?: { model: string; finishReason?: string; kind: string; time: number }
+
+  diagnostic(value: { model: string; finishReason?: string; kind: string }): void {
+    this.lastDiagnostic = { ...value, time: Date.now() }
+  }
   private readonly accounts = new Map<string, { success: number; rateLimits: number; errors: number }>()
   readonly startedAt = Date.now()
 
@@ -9,7 +14,7 @@ export class EngineStats {
     this.accounts.set(accountId, entry)
   }
 
-  snapshot(): { startedAt: number; accounts: Array<{ accountId: string; success: number; rateLimits: number; errors: number }> } {
-    return { startedAt: this.startedAt, accounts: [...this.accounts].map(([accountId, data]) => ({ accountId, ...data })) }
+  snapshot() {
+    return { startedAt: this.startedAt, lastDiagnostic: this.lastDiagnostic, accounts: [...this.accounts].map(([accountId, data]) => ({ accountId, ...data })) }
   }
 }

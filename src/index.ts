@@ -129,6 +129,7 @@ export function apply(ctx: DshContext, rawConfig: Config): void {
     clientConfigRef: config.oauthClientConfigRef,
   })
   const stats = new EngineStats()
+  manager.reportDiagnostic = (diagnostic) => stats.diagnostic(diagnostic)
   const reportSuccess = manager.reportSuccess.bind(manager)
   manager.reportSuccess = (accountId) => {
     stats.record(accountId, 'success')

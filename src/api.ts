@@ -41,6 +41,7 @@ export interface AuthProvider {
   reportRateLimit(accountId: string, delay?: number): void
   reportSuccess(accountId: string): void
   reportError?(accountId: string): void
+  reportDiagnostic?(diagnostic: { model: string; finishReason?: string; kind: string }): void
 }
 
 interface ResponsePart {
@@ -230,6 +231,7 @@ export function streamAntiGravity(
       const response = opened.response
       if (response.body === null) throw new Error('Antigravity returned no response stream')
       let started = false
+      let finishReason: string | undefined
       let current: TextContent | ThinkingContent | undefined
       const ensureStarted = (): void => {
         if (started) return
@@ -297,7 +299,14 @@ export function streamAntiGravity(
             stream.push({ type: 'toolcall_end', contentIndex: index, toolCall, partial: output })
           }
         }
-        if (candidate?.finishReason !== undefined) output.stopReason = mapStopReasonString(candidate.finishReason)
+        if (candidate?.finishReason !== undefined) {
+          finishReason = candidate.finishReason
+          output.stopReason = mapStopReasonString(candidate.finishReason)
+          if (output.stopReason === 'error') {
+            provider.reportDiagnostic?.({ model: model.id, finishReason, kind: 'generation-finish-error' })
+            throw new Error(`Antigravity generation failed: ${finishReason}`)
+          }
+        }
         if (output.content.some((block) => block.type === 'toolCall')) output.stopReason = 'toolUse'
         const usage = data.usageMetadata
         if (usage !== undefined) {
@@ -316,7 +325,10 @@ export function streamAntiGravity(
       }
       for await (const text of readSse(response.body, options.signal)) consume(JSON.parse(text) as ResponseChunk)
       closeCurrent()
-      if (output.content.length === 0) throw new Error('Antigravity returned an empty response')
+      if (output.content.length === 0 || output.content.every((block) => block.type === 'text' && !block.text.trim())) {
+        provider.reportDiagnostic?.({ model: model.id, finishReason, kind: 'empty-response' })
+        throw new Error(`Antigravity returned an empty response (finishReason: ${finishReason ?? 'missing'})`)
+      }
       const reason = output.stopReason === 'toolUse' || output.stopReason === 'length' ? output.stopReason : 'stop'
       stream.push({ type: 'done', reason, message: output })
       if (requestAccountId) provider.reportSuccess(requestAccountId)
