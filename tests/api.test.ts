@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { buildEnvelope, parseRequestAuth, streamAntiGravity } from '../src/api.ts'
-import { maintainedModels } from '../src/models.ts'
+import { buildEnvelope, createAntiGravityApi, parseRequestAuth, streamAntiGravity } from '../src/api.ts'
+import { parseAvailableModels, selectModelRoute } from '../src/models.ts'
+import { transportModels as maintainedModels } from './fixtures/models.ts'
 import type { Context, Model, Tool } from '@earendil-works/pi-ai'
 import type { AntiGravityApi } from '../src/models.ts'
 
@@ -128,6 +129,64 @@ describe('tool transport', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new ReadableStream({ start(controller) { controller.enqueue(encoded); controller.close() } }), { status: 200 })))
   }
 
+  it('forwards effort through both stream entry points and logs the resolved wire route', async () => {
+    const selected = parseAvailableModels({ models: { 'gemini-9.2-flash-low': {}, 'gemini-9.2-flash-high': {} } })[0]!
+    const auth = provider()
+    const resolveModel = vi.fn(async (_model, options, credential) => {
+      expect(credential.accountId).toBe('a')
+      selectModelRoute(selected, options.reasoning)
+      return selected
+    })
+    const api = createAntiGravityApi({ ...auth, resolveModel })
+    for (const [entry, effort] of [['stream', 'low'], ['streamSimple', 'high']] as const) {
+      mockResponse([{ candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }] }])
+      await api[entry](selected, { messages: [] }, { apiKey: JSON.stringify({ token: 'private-token', accountId: 'a', projectId: 'p' }), reasoning: effort }).result()
+      const body = JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string)
+      expect(body.model).toBe(`gemini-9.2-flash-${effort}`)
+      expect(body.request.generationConfig.thinkingConfig.thinkingLevel).toBe(effort)
+      expect(auth.reportLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'model-resolved', model: 'gemini-9.2-flash', effort, wireModel: body.model }))
+    }
+    expect(resolveModel).toHaveBeenCalledTimes(2)
+    expect(JSON.stringify(auth.reportLog.mock.calls)).not.toContain('private-token')
+  })
+
+  it('checks the rotated account before sending inference and never downgrades effort', async () => {
+    const selected = parseAvailableModels({ models: { 'gemini-9.2-flash-high': {} } })[0]!
+    const incompatible = parseAvailableModels({ models: { 'gemini-9.2-flash-low': {} } })[0]!
+    const fetcher = vi.fn().mockResolvedValue(new Response('{"error":{"status":"RESOURCE_EXHAUSTED"}}', { status: 429 }))
+    vi.stubGlobal('fetch', fetcher)
+    const auth = provider()
+    auth.afterRateLimit.mockResolvedValue({ token: 'second', accountId: 'b', projectId: 'b' })
+    const resolveModel = vi.fn(async (_model, options, credential) => {
+      const current = credential.accountId === 'a' ? selected : incompatible
+      selectModelRoute(current, options.reasoning)
+      return current
+    })
+    const message = await streamAntiGravity(selected, { messages: [] }, { apiKey: JSON.stringify({ token: 'first', accountId: 'a', projectId: 'a' }), reasoning: 'high' }, { ...auth, resolveModel }).result()
+    expect(message.errorMessage).toContain('does not offer effort high')
+    expect(resolveModel).toHaveBeenCalledTimes(2)
+    expect(fetcher).toHaveBeenCalledOnce()
+  })
+
+  it('switches an incompatible initially selected account without marking it rate-limited', async () => {
+    const selected = parseAvailableModels({ models: { 'gemini-9.2-flash-high': {} } })[0]!
+    const incompatible = parseAvailableModels({ models: { 'gemini-9.2-flash-low': {} } })[0]!
+    mockResponse([{ candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }] }])
+    const auth = provider()
+    const afterModelUnavailable = vi.fn(async () => ({ token: 'good', accountId: 'a', projectId: 'a' }))
+    const resolveModel = vi.fn(async (_model, options, credential) => {
+      const current = credential.accountId === 'a' ? selected : incompatible
+      selectModelRoute(current, options.reasoning)
+      return current
+    })
+    const message = await streamAntiGravity(selected, { messages: [] }, { apiKey: JSON.stringify({ token: 'bad', accountId: 'b', projectId: 'b' }), reasoning: 'high' }, { ...auth, resolveModel, afterModelUnavailable }).result()
+    expect(message.stopReason).toBe('stop')
+    expect(afterModelUnavailable).toHaveBeenCalledOnce()
+    expect(auth.reportRateLimit).not.toHaveBeenCalled()
+    expect(JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string).model).toBe('gemini-9.2-flash-high')
+    expect(auth.reportLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'model-unavailable' }))
+  })
+
   it('reports incompatible schemas before sending a request without storing schema contents', async () => {
     const fetcher = vi.fn()
     vi.stubGlobal('fetch', fetcher)
@@ -181,7 +240,7 @@ describe('tool transport', () => {
     expect(events.filter((type) => type === 'toolcall_end')).toHaveLength(2)
     expect(message.usage.totalTokens).toBe(30)
     expect(auth.reportSuccess).toHaveBeenCalledWith('a')
-    expect(auth.reportLog.mock.calls.map(([entry]) => entry.event)).toEqual(['request-start', 'http-response', 'generation-finish', 'request-complete'])
+    expect(auth.reportLog.mock.calls.map(([entry]) => entry.event)).toEqual(['request-start', 'model-resolved', 'http-response', 'generation-finish', 'request-complete'])
     const requestId = auth.reportLog.mock.calls[0]![0].requestId
     expect(auth.reportLog.mock.calls.every(([entry]) => entry.requestId === requestId)).toBe(true)
     expect(JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string).requestId).toBe(requestId)

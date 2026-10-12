@@ -8,6 +8,7 @@ import type { UpdateStatus } from '../self-update.ts'
 import { formatDiagnosticReport } from '../diagnostics-format.ts'
 import type { DiagnosticSnapshot } from '../diagnostics-format.ts'
 import { copyDiagnosticLogs, pollDiagnosticLogs } from './diagnostics.ts'
+import type { CatalogStatus } from '../models.ts'
 
 interface SlotsService {
   inject(name: string, factory: () => unknown): () => void
@@ -44,7 +45,7 @@ async function rpc<T>(method: string, args?: Record<string, unknown>, signal?: A
   const abort = () => controller.abort()
   signal?.addEventListener('abort', abort, { once: true })
   if (signal?.aborted) controller.abort()
-  const timeout = window.setTimeout(() => controller.abort(), method.startsWith('update/') ? 150000 : method === 'quota' ? 60000 : 15000)
+  const timeout = window.setTimeout(() => controller.abort(), method.startsWith('update/') ? 150000 : method === 'quota' || method === 'refresh-models' ? 60000 : 15000)
   const mutating = MUTATING.has(method)
   try {
     const response = await fetch(url, {
@@ -273,12 +274,6 @@ function AntigravityPage(): React.ReactElement {
       }).catch((error: Error) => { if (activeRef.current) setError(error.message) })
   }, [])
 
-  const refreshModels = React.useCallback(() => {
-    rpc('refresh-models', {}, lifetimeRef.current?.signal)
-      .then(() => { if (activeRef.current) setNotice('Actualización de modelos solicitada. Comprueba el selector de modelos.') })
-      .catch((error: Error) => { if (activeRef.current) setError(error.message) })
-  }, [])
-
   if (accounts === null) {
     return <div className="agy-page"><p className="agy-note">Cargando cuentas…</p>{error ? <><p className="agy-error" role="alert">{error}</p><Button onClick={() => { setError(''); void load() }}>Reintentar</Button></> : null}</div>
   }
@@ -303,7 +298,6 @@ function AntigravityPage(): React.ReactElement {
     }
     rows.push(<Row key="add" title="Añadir otra cuenta" controls={<Button onClick={startLogin} disabled={busy || actionBusy}>{busy ? 'Esperando autorización…' : 'Conectar con Google'}</Button>} />)
     rows.push(<Row key="all" title="Cuotas de las cuentas" desc="Consulta las ventanas de uso y la disponibilidad informadas por Antigravity." controls={<Button onClick={showQuota} disabled={quotaLoading || actionBusy}>{quotaLoading ? 'Consultando…' : 'Consultar cuotas'}</Button>} />)
-    rows.push(<Row key="models" title="Modelos disponibles" controls={<Button onClick={refreshModels} disabled={busy || actionBusy}>Actualizar modelos</Button>} />)
     rows.push(<Row key="stats" title="Actividad de esta instancia" controls={<Button onClick={showStats}>Consultar actividad</Button>} />)
     rows.push(<Row key="disconnect" title="Desconectar" controls={<Button danger onClick={() => logout(undefined)} disabled={actionBusy || busy}>Desconectar todas</Button>} />)
   }
@@ -367,6 +361,48 @@ function PackageUpdates(): React.ReactElement {
       {state.lastError ? <p className="agy-error" role="alert">Actualización no realizada: {state.lastError}. Se conserva la versión anterior; revisa el origen o instala manualmente.</p> : null}
     </> : null}
     {busy ? <p className="agy-note" role="status">Procesando actualización…</p> : null}
+    {error ? <p className="agy-error" role="alert">{error}</p> : null}
+  </div>
+}
+
+function ModelCatalogPanel(): React.ReactElement {
+  const [state, setState] = React.useState<CatalogStatus | null>(null)
+  const [error, setError] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const lifetime = React.useRef<AbortController | null>(null)
+  const pending = React.useRef(false)
+  const actionPending = React.useRef(false)
+  React.useEffect(() => {
+    const controller = new AbortController()
+    lifetime.current = controller
+    const load = async () => {
+      if (pending.current || actionPending.current) return
+      pending.current = true
+      try {
+        const result = await rpc<CatalogStatus>('models/status', undefined, controller.signal)
+        if (!controller.signal.aborted && !actionPending.current) { setState(result); setError('') }
+      } catch { if (!controller.signal.aborted && !actionPending.current) setError('No se pudo consultar el catálogo del servidor. Comprueba la versión del plugin y reinicia Harness.') }
+      finally { pending.current = false }
+    }
+    void load()
+    const timer = window.setInterval(() => { void load() }, 5000)
+    return () => { controller.abort(); window.clearInterval(timer) }
+  }, [])
+  const refresh = async () => {
+    if (actionPending.current) return
+    actionPending.current = true
+    setBusy(true); setError('')
+    try {
+      const result = await rpc<{ catalog?: CatalogStatus }>('refresh-models', {}, lifetime.current?.signal)
+      if (!lifetime.current?.signal.aborted && result.catalog) setState(result.catalog)
+    } catch (error) { if (!lifetime.current?.signal.aborted) setError(error instanceof Error ? error.message : 'No se pudo actualizar el catálogo.') }
+    finally { actionPending.current = false; if (!lifetime.current?.signal.aborted) setBusy(false) }
+  }
+  return <div className="agy-page">
+    <Row title="Modelos disponibles" desc={state ? `${state.modelCount} modelos · ${state.variantCount} variantes · ${state.source === 'google' ? 'Google' : state.source === 'cache' ? 'Caché' : 'Sin catálogo disponible'}${state.updatedAt ? ` · Actualizado: ${new Date(state.updatedAt).toLocaleString()}` : ''}` : 'Consultando catálogo…'} controls={<Button disabled={busy || state?.refreshing} onClick={() => { void refresh() }}>{busy || state?.refreshing ? 'Actualizando…' : 'Actualizar modelos'}</Button>} />
+    <p className="agy-note">Una entrada por modelo y versión. Selecciona la variante desde effort en la conversación. Actualización automática cada 15 minutos y al cambiar de cuenta.</p>
+    {state?.ignoredCount ? <p className="agy-note">{state.ignoredCount} entradas de Google no publicadas por formato o familia no compatible.</p> : null}
+    {state?.error ? <p className="agy-error" role="alert">{state.error}</p> : null}
     {error ? <p className="agy-error" role="alert">{error}</p> : null}
   </div>
 }
@@ -447,7 +483,7 @@ function DiagnosticLogs(): React.ReactElement {
 
 function BundleConfig(props: { view?: string }): React.ReactElement {
   if (props.view === 'summary') return <span>Conecta tu cuenta de Google para utilizar los modelos de Antigravity.</span>
-  return <><AntigravityPage /><DiagnosticLogs /><PackageUpdates /></>
+  return <><AntigravityPage /><ModelCatalogPanel /><DiagnosticLogs /><PackageUpdates /></>
 }
 
 export const inject = ['slots']

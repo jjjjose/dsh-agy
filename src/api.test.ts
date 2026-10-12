@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildEnvelope, streamAntiGravity } from './api.ts'
-import { maintainedModels, parseAvailableModels } from './models.ts'
+import { parseAvailableModels, withLegacyAliases } from './models.ts'
 import { cleanContents, cleanSchema, readSse, responseFailure } from './transport-transform.ts'
 
 afterEach(() => vi.unstubAllGlobals())
+const maintainedModels = withLegacyAliases(parseAvailableModels({ models: {
+  'gemini-3.1-pro-high': {}, 'claude-opus-4-6-thinking': { maxOutputTokens: 64000 },
+} }))
 const model = maintainedModels.find((item) => item.id === 'gemini-3.1-pro-high')!
 const context = { messages: [{ role: 'user' as const, content: 'hello', timestamp: 0 }] }
 const event = JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: 'ok' }] } }] } })
@@ -69,7 +72,7 @@ describe('Antigravity transport', () => {
     const envelope = buildEnvelope(model, context, {}, 'p')
     expect(envelope.model).toBe('gemini-3.1-pro-high')
     expect(envelope.request).toMatchObject({ generationConfig: { thinkingConfig: { thinkingLevel: 'high' } } })
-    expect(parseAvailableModels({ models: { 'gemini-3.1-pro-high': {}, 'gemini-3.1-pro-low': {} } }).map((item) => item.id)).toEqual(['gemini-3.1-pro-high', 'gemini-3.1-pro-low'])
+    expect(parseAvailableModels({ models: { 'gemini-3.1-pro-high': {}, 'gemini-3.1-pro-low': {} } }).map((item) => item.id)).toEqual(['gemini-3.1-pro'])
     expect(() => parseAvailableModels({ models: null })).toThrow()
   })
 

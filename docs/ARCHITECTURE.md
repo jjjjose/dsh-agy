@@ -11,10 +11,11 @@ At runtime the host provides the `@deepseek-ai/*` packages and `@earendil-works/
 
 ```
 model picker
-   └─> Harness llm service ── PiAiAdapter (profiles: google-antigravity)
+   └─> Harness llm service ── AntigravityAdapter / PiAiAdapter (profiles: google-antigravity)
           └─> createProvider(...).stream(model, context, options)
                  └─> createAntiGravityApi(manager).stream(...)
-                        ├─ manager.resolveApiKey()  → rotation + token refresh → RequestAuth JSON
+                         ├─ manager.resolveApiKey()  → rotation + token refresh → RequestAuth JSON
+                         ├─ catalog.resolve(account, model, effort) → validate the real account's capabilities
                         ├─ buildEnvelope(...)       → { project, model, request, requestType, ... }
                         ├─ POST v1internal:streamGenerateContent?alt=sse
                         ├─ SSE → assistant events (text / thinking / toolCall), signatures kept
@@ -33,7 +34,10 @@ model picker
 | `storage.ts` | Persistent account pool (`$DSH_HOME/dsh-agy/accounts.json`), atomic writes, in-process lock. |
 | `rotation.ts` | Health tracker, token bucket, rate-limit/cooldown checks, sticky account selection. |
 | `manager.ts` | Orchestrates pool + rotation + refresh; implements the auth source for the transport; mirrors the active account into the credential store. |
-| `models.ts` | Maintained catalog + `fetchAvailableModels` reconciliation. |
+| `models.ts` | Dynamic `fetchAvailableModels` parsing, identity grouping, effort routes and hidden legacy aliases. |
+| `model-adapter.ts` | Filters legacy aliases from the picker while retaining internal ID resolution through the host adapter. |
+| `catalog.ts` | Per-account/project discovery, 15-minute freshness, 24-hour sanitized disk fallback, invalidation and route validation. |
+| `catalog-controller.ts` | Startup/periodic/manual/account-change refresh, revision guards and lifecycle cleanup. |
 | `api.ts` | Cloud Code Assist envelope + SSE stream → pi-ai events; rotation-aware retry. |
 | `quota.ts` | Fetch/format dual-window quota. |
 | `search.ts` | Grounding-only Google Search, shared by the native tool and RPC. |
@@ -51,12 +55,23 @@ model picker
 2. Score by health (2×), token balance (5×), and rest recency (0.1×); the active account keeps a **stickiness** bonus so it only switches when another is clearly better.
 3. Refresh the chosen account's access token if near expiry.
 4. Classify failures before rotating: authorization errors are not automatically quota errors. Rebuild the envelope with the selected account's project on every retry.
+5. Validate the selected model/effort for the sending account. Skip incompatible alternative accounts without changing the model or effort. Capability mismatch is not a quota penalty.
 
 Health starts at 70, recovers +2/hour, drops on rate limits (−10) and failures (−20), and gates selection below 50. A client-side token bucket smooths bursts.
 
+## Dynamic model catalog
+
+Google's model IDs remain the wire identities. The picker uses a canonical version/family identity and explicitly mapped effort routes, not grouping by display name alone. The known `gemini-3-flash-agent` alias maps to Gemini 3.5 Flash's Medium/High routes. New compatible version IDs require no hardcoded version list.
+
+DSH reads the model's `thinkingLevelMap` and passes its validated effort to `streamSimple` as `options.reasoning`, except Off, which the host deliberately omits. Consequently, models offering Off also use their Off route as the provider default. Both transport entry points resolve effort before building the envelope. Claude's thinking routes use budgets capped below the output limit; Gemini tier routes carry their selected thinking level.
+
+`catalog-controller.ts` uses revision checks so late account-selection work cannot replace the current account's catalog. `catalog.ts` deduplicates discovery by account/project, bounds requests to 30 seconds, and cancels on disposal. Profiles are replaced only when the visible model snapshot changes; prepared DSH calls retain their own snapshot. Retired models are removed even if Google returns a valid empty catalog.
+
+Cache files under `$DSH_HOME/dsh-agy/model-catalogs/<sha256>.json` contain only reconstructed model metadata. Freshness is 15 minutes and network fallback expires after 24 hours. Cache load is validated; discovery HTTP 401/403 and removed/revoked accounts invalidate the corresponding entries. No static model list is shown if both discovery and cache are unavailable.
+
 ## Trust boundary & storage
 
-- The RPC registers via `webServer.register({ kind: 'prefix', path: '/_dsh/dsh-agy' })` and gates every request with `connection.requestRejection(req)`. GET serves reads (`status`, `poll`, `quota`, `stats`); POST is required for actions (`login`, `logout`, `activate`, `refresh-models`, `search`). JSON responses use `Cache-Control: no-store`. Responses never include token values.
+- The RPC registers via `webServer.register({ kind: 'prefix', path: '/_dsh/dsh-agy' })` and gates every request with `connection.requestRejection(req)`. GET serves reads (`status`, `poll`, `quota`, `stats`, `models/status`, `diagnostics`); POST is required for actions (`login`, `logout`, `activate`, `refresh-models`, `search`, diagnostic configuration/clear). Manual model refresh awaits completion and returns catalog status. JSON responses use `Cache-Control: no-store`. Responses never include token values.
 - Account tokens live only in `$DSH_HOME/dsh-agy/accounts.json` (`0600`), validated on load and written atomically. The active account is additionally mirrored into the credential reference `GOOGLE_ANTIGRAVITY_OAUTH_CREDENTIAL`.
 
 ## Build

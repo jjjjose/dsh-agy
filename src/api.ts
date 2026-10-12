@@ -25,8 +25,9 @@ import type {
 import { convertMessages, isThinkingPart, mapStopReasonString, retainThoughtSignature } from '@earendil-works/pi-ai/api/google-shared'
 import { ENDPOINTS, antiGravityHeaders } from './constants.ts'
 import type { AntiGravityApi } from './models.ts'
-import { cleanContents, cleanSchema, readSse, resolveWireModel, responseFailure, SchemaConversionError } from './transport-transform.ts'
+import { cleanContents, cleanSchema, readSse, responseFailure, SchemaConversionError } from './transport-transform.ts'
 import type { DiagnosticRecord } from './diagnostics-format.ts'
+import { ModelSelectionError, selectedModelEffort, selectModelRoute } from './models.ts'
 
 /** Per-request auth handed to the transport, including the owning account. */
 export interface RequestAuth {
@@ -38,12 +39,14 @@ export interface RequestAuth {
 /** Rotation-aware auth source supplied by the account manager. */
 export interface AuthProvider {
   /** Next distinct auth after `accountId` was rate-limited, if any. */
-  afterRateLimit(accountId: string): Promise<RequestAuth | undefined>
+  afterRateLimit(accountId: string, model?: Model<AntiGravityApi>, options?: StreamOptions): Promise<RequestAuth | undefined>
   reportRateLimit(accountId: string, delay?: number): void
   reportSuccess(accountId: string): void
   reportError?(accountId: string): void
   reportDiagnostic?(diagnostic: { model: string; finishReason?: string; kind: string; toolCount?: number }): void
   reportLog?(entry: DiagnosticRecord): void
+  resolveModel?(model: Model<AntiGravityApi>, options: StreamOptions, auth: RequestAuth, signal?: AbortSignal): Promise<Model<AntiGravityApi>>
+  afterModelUnavailable?(accountId: string, model: Model<AntiGravityApi>, options: StreamOptions): Promise<RequestAuth | undefined>
 }
 
 class ToolSchemaError extends Error {
@@ -116,14 +119,15 @@ export function buildEnvelope(
     request.systemInstruction = { role: 'user', parts: [{ text: context.systemPrompt }] }
   }
   const generationConfig: Record<string, unknown> = {}
-  const wire = resolveWireModel(model.id)
+  const wire = selectModelRoute(model, (options as SimpleStreamOptions).reasoning)
   if (wire.thinking) generationConfig.thinkingConfig = wire.thinking
   const reasoning = (options as SimpleStreamOptions).reasoning
-  if (model.id.includes('claude-') && model.id.includes('thinking') && reasoning !== undefined) {
+  if (model.id.includes('claude-') && typeof wire.thinking?.thinkingBudget === 'number') {
     const budgets: Record<string, number> = { off: 0, minimal: 1024, low: 8192, medium: 16384, high: 32768, xhigh: 32768, max: 32768 }
     const custom = (options as SimpleStreamOptions).thinkingBudgets
-    const budget = (custom as Record<string, number> | undefined)?.[reasoning] ?? budgets[reasoning] ?? 16384
-    generationConfig.thinkingConfig = { includeThoughts: budget > 0, thinkingBudget: Math.min(budget, Math.max(0, (options.maxTokens ?? model.maxTokens) - 1)) }
+    const budget = reasoning === undefined ? wire.thinking.thinkingBudget : (custom as Record<string, number> | undefined)?.[reasoning] ?? budgets[reasoning] ?? 16384
+    const limited = Math.min(budget, Math.max(0, (options.maxTokens ?? model.maxTokens) - 1))
+    generationConfig.thinkingConfig = { includeThoughts: limited > 0, thinkingBudget: limited }
   }
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
   if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = options.maxTokens
@@ -174,12 +178,27 @@ async function openResponse(
   auth: RequestAuth,
   provider: AuthProvider,
   requestId: string,
+  sending: (accountId: string) => void,
 ): Promise<{ response: Response; auth: RequestAuth }> {
   let current = auth
   for (let attempt = 0; attempt < 3; attempt++) {
     options.signal?.throwIfAborted()
+    let requestModel: Model<AntiGravityApi>
+    try { requestModel = await provider.resolveModel?.(model, options, current, options.signal) ?? model }
+    catch (error) {
+      if (!(error instanceof ModelSelectionError) || !provider.afterModelUnavailable || !current.accountId) throw error
+      log(provider, { requestId, model: model.id, event: 'model-unavailable', attempt: attempt + 1 })
+      const next = await provider.afterModelUnavailable(current.accountId, model, options)
+      if (!next) throw error
+      log(provider, { requestId, model: model.id, event: 'account-rotation', attempt: attempt + 1 })
+      current = next
+      continue
+    }
+    const route = selectModelRoute(requestModel, (options as SimpleStreamOptions).reasoning)
+    log(provider, { requestId, model: model.id, event: 'model-resolved', wireModel: route.id,
+      effort: selectedModelEffort(requestModel, (options as SimpleStreamOptions).reasoning) })
     let payload: Record<string, unknown>
-    try { payload = buildEnvelope(model, context, options, current.projectId) }
+    try { payload = buildEnvelope(requestModel, context, options, current.projectId) }
     catch (error) {
       provider.reportDiagnostic?.({ model: model.id, kind: 'request-conversion-error', toolCount: context.tools?.length ?? 0 })
       log(provider, { requestId, model: model.id, event: 'schema-error',
@@ -201,6 +220,7 @@ async function openResponse(
       }
       let response: Response
       try {
+        sending(current.accountId)
         response = await fetch(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
           method: 'POST', headers, body,
           ...options.signal === undefined ? {} : { signal: options.signal },
@@ -225,7 +245,7 @@ async function openResponse(
     // Rate-limited or retryable: rotate to the next account if available.
     if (current.accountId && failure?.rateLimited) {
       provider.reportRateLimit(current.accountId, failure.delay)
-      const next = await provider.afterRateLimit(current.accountId)
+      const next = await provider.afterRateLimit(current.accountId, model, options)
       if (next) {
         log(provider, { requestId, model: model.id, event: 'account-rotation', attempt: attempt + 1 })
         current = next
@@ -270,9 +290,8 @@ export function streamAntiGravity(
     log(provider, { requestId, model: model.id, event: 'request-start', toolCount: context.tools?.length ?? 0 })
     try {
       const auth = parseRequestAuth(options.apiKey)
-      requestAccountId = auth.accountId
       stage = 'request'
-      const opened = await openResponse(model, context, options, auth, provider, requestId)
+      const opened = await openResponse(model, context, options, auth, provider, requestId, (accountId) => { requestAccountId = accountId })
       requestAccountId = opened.auth.accountId
       const response = opened.response
       stage = 'stream'

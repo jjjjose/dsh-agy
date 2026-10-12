@@ -40,13 +40,26 @@ No provocar límites agotando cuota: validar la rotación con respuestas simulad
 7. Reiniciar DSH: conservar la preferencia de activación, pero no las entradas anteriores. El arranque puede añadir entradas nuevas si el registro estaba activado.
 8. Salir de la página: detener la consulta periódica del panel sin detener el registro del servidor.
 
-El switch solo controla la generación de logs del transporte de inferencia, no los logs generales del host ni las peticiones independientes de cuotas, búsqueda o OAuth. La última actividad estadística funciona siempre. El informe excluye `finishMessage`, que puede contener datos privados; herramienta y ubicación del esquema pueden revelar nombres propios del proyecto, por lo que debe revisarse antes de compartirlo.
+El switch controla logs del transporte de inferencia y del catálogo de modelos, no los logs generales del host ni las peticiones independientes de cuotas, búsqueda o OAuth. La última actividad estadística funciona siempre. El informe excluye `finishMessage`, que puede contener datos privados; herramienta y ubicación del esquema pueden revelar nombres propios del proyecto, por lo que debe revisarse antes de compartirlo.
+
+## Catálogo dinámico y variantes
+
+1. Comprobar una entrada por modelo/versión, sin Low/Medium/High separados en el listado.
+2. Elegir dos esfuerzos disponibles y enviar solicitudes. Con logs activados, verificar `model-resolved`, `effort` y `wireModel`: cambiar el esfuerzo debe cambiar la ruta/configuración, no solo la interfaz.
+3. Comprobar que Pro con solo Low/High no ofrece Medium. Para una ruta base sin niveles anunciados, no inventar un menú de variantes.
+4. Cambiar de cuenta y verificar fecha/origen y catálogo correspondiente, sin reapariciones del catálogo anterior por respuestas tardías.
+5. Probar **Actualizar modelos**; comprobar el resultado real y el contador de entradas incompatibles. Esperar un refresco periódico de 15 minutos sin reconectar.
+6. Reiniciar con caché válida y un fallo de red; comprobar que se informa el respaldo. No usarlo después de 24 horas ni después de retirar autorización/cuenta.
+7. Verificar una selección antigua con sufijo: sigue resolviéndose si Google ofrece la ruta, pero no crea un duplicado en el listado. Volver a elegir el modelo base para cambiar libremente de esfuerzo.
+8. Validar retirada de modelos, descubrimiento de nuevas versiones y rotación entre cuentas con respuestas simuladas, sin provocar agotamiento real de cuota.
+
+Las pruebas automatizadas cubren nuevas versiones ficticias, agrupación, alias, límites incompletos, caché, invalidación, cancelación, respuestas tardías y selección por cuenta. La API interna puede cambiar sus metadatos; las pruebas no sustituyen comprobar el selector y las rutas contra DSH/Google reales.
 
 ## Limitaciones
 
 ### Regresión de `MALFORMED_FUNCTION_CALL`
 
-En sesiones nuevas con `gemini-3.8-flash-high`, repetir el mismo prompt con herramientas básicas, con cada MCP por separado y con el catálogo completo. Verificar una llamada válida, su resultado y una segunda llamada en la misma conversación. Repetir con Claude si está disponible.
+En sesiones nuevas con `gemini-3.8-flash` y effort High, si están disponibles, repetir el mismo prompt con herramientas básicas, con cada MCP por separado y con el catálogo completo. Verificar una llamada válida, su resultado y una segunda llamada en la misma conversación. Repetir con Claude si está disponible.
 
 El error de generación conserva el `finishMessage` del backend cuando existe; puede contener argumentos generados, por lo que debe revisarse y redactarse antes de compartirlo. Las estadísticas solo guardan modelo, motivo, tipo de diagnóstico y cantidad de herramientas, no ese mensaje ni el esquema.
 
@@ -55,6 +68,6 @@ La conversión usa `parameters` del protocolo interno: transforma `oneOf` en `an
 Un catálogo sintético de 135 herramientas verifica la conversión en tests; no prueba límites del backend ni confirma que un error de generación concreto esté resuelto en Google.
 
 - El servicio Google usado es interno y puede cambiar sin aviso.
-- La disponibilidad de modelos depende de cuenta y cuota, no de aparecer en el catálogo mantenido.
+- La disponibilidad de modelos depende de cuenta y cuota. Las familias aún no compatibles se contabilizan, pero no se publican; no existe una lista cerrada de versiones.
 - Las tres herramientas se registran mediante `@deepseek-ai/dsh-tools`. Su disponibilidad para un agente depende de sus políticas y del modo de presentación del host (nativo o ejecución de código).
 - Las estadísticas son de la instancia actual y se reinician al recargar el plugin.

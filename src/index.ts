@@ -5,23 +5,25 @@
  */
 
 import { createProvider, defaultProviderAuthContext, InMemoryCredentialStore } from '@earendil-works/pi-ai'
-import type { ApiKeyAuth, Model, Provider } from '@earendil-works/pi-ai'
+import type { ApiKeyAuth, Model, Provider, SimpleStreamOptions } from '@earendil-works/pi-ai'
 import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
-import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
+import { AntigravityAdapter } from './model-adapter.ts'
 import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
-import type { AntiGravityApi } from './models.ts'
+import type { AntiGravityApi, DynamicModel } from './models.ts'
 import { createAntiGravityApi } from './api.ts'
 import { createAntiGravityOAuth } from './auth.ts'
 import { DEFAULT_OAUTH_CLIENT_CONFIG_REF, resolveOAuthClientConfig } from './client-config.ts'
 import { ENDPOINTS } from './constants.ts'
-import type { DshContext } from './dsh-context.ts'
+import type { DshContext, LlmRegistration } from './dsh-context.ts'
 import { AccountManager } from './manager.ts'
-import { PROVIDER, fetchAvailableModels, maintainedModels } from './models.ts'
+import { ModelSelectionError, PROVIDER, selectedModelEffort, withLegacyAliases } from './models.ts'
 import { registerRpc } from './rpc.ts'
 import { EngineStats } from './stats.ts'
 import { Diagnostics } from './diagnostics.ts'
+import { ModelCatalog } from './catalog.ts'
+import { CatalogController } from './catalog-controller.ts'
 import { registerTools } from './tools.ts'
 import { createSelfUpdater, DEFAULT_UPDATE_INTERVAL_MS } from './self-update.ts'
 
@@ -163,58 +165,51 @@ export function apply(ctx: DshContext, rawConfig: Config): void {
   }
   void manager.init().catch(() => ctx.logger.warn('dsh-agy: account storage could not be initialized'))
 
-  let profiles = profileFor(manager, config, maintainedModels, oauth)
-  const adapter = new PiAiAdapter({
+  let profiles = profileFor(manager, config, [], oauth)
+  let registration: LlmRegistration | undefined
+  let publishedModels: readonly DynamicModel[] | undefined
+  const catalog = new ModelCatalog({ log: (entry) => diagnostics.record(entry), changed: () => {
+    const models = catalog.models()
+    if (models === publishedModels) return
+    publishedModels = models
+    profiles = profileFor(manager, config, withLegacyAliases(models), oauth)
+    registration?.replace([PROVIDER])
+  } })
+  manager.resolveModel = async (model, options, auth, signal) => {
+    const identities = await manager.catalogIdentities()
+    if (!identities.some((identity) => identity.accountId === auth.accountId && identity.projectId === auth.projectId)) throw new ModelSelectionError('Antigravity sending account is unavailable')
+    return catalog.resolve(auth, model.id, selectedModelEffort(model, (options as SimpleStreamOptions).reasoning), signal)
+  }
+  const catalogController = new CatalogController(catalog, manager)
+  manager.accountsChanged = () => { void catalogController.refresh() }
+  const adapter = new AntigravityAdapter({
     profiles: () => profiles,
     resolveApiKey: () => manager.resolveApiKey(),
     auth: { credentials: new InMemoryCredentialStore(), authContext: defaultProviderAuthContext() },
     resolveAttachments: () => ctx.get('attachments'),
-  })
-  const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
-  ctx.effect(() => () => registration(), 'dsh-agy: provider registration')
+  }, () => new Set(catalog.models().map((model) => model.id)))
+  registration = ctx.llm.registerAdapter([PROVIDER], adapter)
+  ctx.effect(() => () => registration?.(), 'dsh-agy: provider registration')
   ctx.effect(() => () => manager.dispose(), 'dsh-agy: account manager')
   ctx.effect(() => registerTools(ctx.tools, manager, stats), 'dsh-agy: agent tools')
 
-  // Live catalog reconciliation against fetchAvailableModels.
-  const controller = new AbortController()
-  let refreshing: Promise<void> | undefined
-  const refresh = (): void => {
-    refreshing ??= (async () => {
-      try {
-        const auth = await manager.resolveAuth()
-        const live = await fetchAvailableModels(auth.token, auth.projectId, controller.signal)
-        controller.signal.throwIfAborted()
-        profiles = profileFor(manager, config, live, oauth)
-        registration.replace([PROVIDER])
-      } catch (error) {
-        if (!controller.signal.aborted) {
-          ctx.logger.info('dsh-agy: live model refresh unavailable; keeping the maintained catalog')
-          ctx.logger.debug('dsh-agy: catalog refresh failed')
-        }
-      } finally {
-        refreshing = undefined
-      }
-    })()
-  }
+  const refresh = () => catalogController.refresh()
   ctx.effect(() => {
-    const timers = [setTimeout(refresh, 0), setTimeout(refresh, 250)]
-    return () => {
-      for (const timer of timers) clearTimeout(timer)
-      controller.abort()
-    }
+    catalogController.start()
+    return () => catalogController.dispose()
   }, 'dsh-agy: live refresh')
 
   ctx.on('credentials/reference-updated', ((ref: string) => {
-    if (ref === config.oauthCredentialEnv) refresh()
+    if (ref === config.oauthCredentialEnv) void refresh()
   }) as never)
   // RC hosts used the earlier event name; catalog refresh is deduplicated.
   ctx.on('credentials/updated', ((ref: string) => {
-    if (ref === config.oauthCredentialEnv) refresh()
+    if (ref === config.oauthCredentialEnv) void refresh()
   }) as never)
 
   // Register RPC once the web server and connection gate are available.
   ctx.inject(['connection', 'webServer'], (webCtx) => {
-    const dispose = registerRpc(webCtx.webServer, webCtx.connection, manager, { refreshModels: refresh, stats, updater, diagnostics })
+    const dispose = registerRpc(webCtx.webServer, webCtx.connection, manager, { refreshModels: refresh, stats, updater, diagnostics, catalog })
     webCtx.effect(() => dispose, 'dsh-agy: rpc')
   })
 }

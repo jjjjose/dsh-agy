@@ -7,6 +7,7 @@ vi.mock('../src/storage.ts', () => ({ loadPool: mocks.load, savePool: mocks.save
 vi.mock('../src/token.ts', () => ({ refreshAccountAccess: mocks.refresh }))
 vi.mock('../src/client-config.ts', () => ({ DEFAULT_OAUTH_CLIENT_CONFIG_REF: 'config', resolveOAuthClientConfig: mocks.config }))
 import { AccountManager } from '../src/manager.ts'
+import { parseAvailableModels } from '../src/models.ts'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -34,6 +35,33 @@ beforeEach(() => {
 })
 
 describe('AccountManager concurrency and eligibility', () => {
+  it('gets catalog credentials without consuming an inference request budget', async () => {
+    const a = { ...account(), accessToken: 'access', accessExpires: Date.now() + 3600000 }
+    mocks.load.mockResolvedValue({ accounts: [a], activeId: a.id })
+    const { instance } = manager()
+    const identity = await instance.catalogIdentity()
+    expect(identity).toEqual({ accountId: a.id, projectId: a.projectId })
+    expect(await instance.catalogAuth(identity!)).toEqual({ ...identity, token: 'access' })
+    expect(mocks.save).not.toHaveBeenCalled()
+  })
+
+  it('skips alternative accounts without the selected model/effort during rotation', async () => {
+    const accounts = ['a', 'b', 'c'].map((id) => ({ ...account(), id, accessToken: `access-${id}`, accessExpires: Date.now() + 3600000 }))
+    mocks.load.mockResolvedValue({ accounts, activeId: 'a' })
+    const { instance } = manager()
+    const selected = parseAvailableModels({ models: { 'gemini-9.1-pro-high': {} } })[0]!
+    instance.resolveModel = vi.fn(async (_model, _options, auth) => {
+      if (auth.accountId === 'b') throw new Error('unsupported model')
+      return selected
+    })
+    const rotated = await instance.afterRateLimit('a', selected, { reasoning: 'high' })
+    expect(rotated?.accountId).toBe('c')
+    expect(instance.resolveModel).toHaveBeenCalledTimes(2)
+    expect(mocks.save).toHaveBeenCalledOnce()
+    instance.resolveModel = vi.fn(async () => { throw new Error('unsupported effort') })
+    await expect(instance.afterRateLimit('a', selected, { reasoning: 'high' })).rejects.toThrow('No alternative')
+  })
+
   it('loads the pool once for simultaneous callers', async () => {
     const pending = deferred<{ version: number; accounts: Account[] }>()
     mocks.load.mockReturnValue(pending.promise)

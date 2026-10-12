@@ -15,6 +15,7 @@ import { executeSearch } from './search.ts'
 import { UpdateInputError } from './self-update.ts'
 import type { SelfUpdater } from './self-update.ts'
 import type { Diagnostics } from './diagnostics.ts'
+import type { ModelCatalog } from './catalog.ts'
 
 export const ROUTE_PREFIX = '/_dsh/dsh-agy'
 const MAX_BODY_BYTES = 64 * 1024
@@ -66,7 +67,7 @@ export function registerRpc(
   webServer: WebServerService,
   connection: ConnectionService,
   manager: AccountManager,
-  options: { refreshModels?: () => void; stats?: EngineStats; updater?: SelfUpdater; diagnostics?: Diagnostics } = {},
+  options: { refreshModels?: () => void | Promise<void>; stats?: EngineStats; updater?: SelfUpdater; diagnostics?: Diagnostics; catalog?: ModelCatalog } = {},
 ): () => void {
   return webServer.register({
     kind: 'prefix',
@@ -87,6 +88,11 @@ export function registerRpc(
         const method = req.method ?? 'GET'
 
         if (method === 'GET') {
+          if (path === '/models/status') {
+            if (!options.catalog) { send(res, 503, { error: 'Model catalog unavailable' }); return }
+            send(res, 200, options.catalog.status())
+            return
+          }
           if (path === '/diagnostics') {
             if (!options.diagnostics) { send(res, 503, { error: 'Diagnostic logs unavailable' }); return }
             send(res, 200, options.diagnostics.snapshot())
@@ -150,8 +156,8 @@ export function registerRpc(
             return
           }
           if (path === '/refresh-models') {
-            options.refreshModels?.()
-            send(res, 202, { ok: true })
+            await options.refreshModels?.()
+            send(res, 200, { ok: true, catalog: options.catalog?.status() })
             return
           }
           if (path === '/search') {

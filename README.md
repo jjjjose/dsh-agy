@@ -13,7 +13,7 @@ Sign in with your Google account and use the models from your **Antigravity Codi
 - **One-click Google login** — OAuth (PKCE) through a localhost callback; no client id/secret to configure.
 - **Multi-account + rotation** — add several Google accounts; requests rotate automatically using health scoring, a token bucket, and sticky selection. Rate-limited (429) accounts cool down and the request retries on the next account.
 - **Streaming inference** — native `v1internal:streamGenerateContent?alt=sse` transport that surfaces text, thinking, and tool-call blocks, preserving Gemini thought signatures.
-- **Live model catalog** — the visible model list is reconciled with your account's `fetchAvailableModels`, so models Google retires disappear automatically.
+- **Dynamic model catalog** — discover compatible new versions from your account's `fetchAvailableModels`, with one entry per model and variants chosen via the Harness effort selector. Refreshes every 15 minutes.
 - **Quota view** — see your dual-window (5h + weekly) usage per account from the plugin settings page.
 - **Settings UI** — a plugin page inside the Harness plugin manager to sign in, switch/remove accounts, and check quota.
 - **Windows-first** — no dependence on a macOS `.app` bundle; headers identify the real host platform.
@@ -98,7 +98,7 @@ Ejemplos: «Consulta la cuota de Antigravity» o «Busca la documentación ofici
 
 En **Plugins → Google Antigravity**, activa **Activar logs de diagnóstico**, reproduce el problema y pulsa **Copiar logs**. El panel se actualiza cada tres segundos mientras el registro esté activado y la página esté abierta. **Limpiar** vacía el historial; **Actualizar** permite consultarlo manualmente incluso con el registro apagado.
 
-El informe contiene hora, `requestId`, modelo, cantidad de herramientas, estados HTTP, reintentos/rotaciones, duración, etapa del fallo y `finishReason`. Los errores de conversión incluyen herramienta y ubicación del esquema. No contiene tokens, cabeceras, prompts, argumentos, respuestas ni `finishMessage`. Los nombres de herramientas y campos del esquema pueden ser propios de tu proyecto: revisa el informe antes de compartirlo.
+El informe contiene hora, `requestId`, modelo, effort, ruta real resuelta, cantidad de herramientas, estados HTTP, reintentos/rotaciones, duración, etapa del fallo y `finishReason`. También registra actualización y respaldo del catálogo. Los errores de conversión incluyen herramienta y ubicación del esquema. No contiene tokens, cabeceras, prompts, argumentos, respuestas ni `finishMessage`. Los nombres de herramientas y campos del esquema pueden ser propios de tu proyecto: revisa el informe antes de compartirlo.
 
 El registro está desactivado por defecto y guarda como máximo **200 entradas en memoria**. Apagarlo detiene la captura sin borrar el historial. La preferencia se guarda en `diagnostics-config.json` dentro del directorio de estado del plugin (`DSH_HOME/dsh-agy`, o `~/.dsh/dsh-agy`); las entradas nunca se guardan en disco y se pierden al recargar el plugin. Las estadísticas de **Consultar actividad** funcionan independientemente del switch.
 
@@ -148,15 +148,19 @@ Para reportar errores, incluye versión de DSH, sistema operativo y forma de ins
 
 Más detalles: [tutorial en español](docs/TUTORIAL.es.md), [instalación](docs/INSTALL.md) y [validación](docs/VALIDATION.md).
 
-### Models
+### Modelos dinámicos y effort
 
-After signing in, the provider appears as **Google Antigravity** in the model picker, exposing request ids such as:
+El selector muestra una sola entrada por versión: por ejemplo **Gemini 3.8 Flash**, **Gemini 3.1 Pro**, **Claude Sonnet 4.6** o **GPT-OSS 120B**. No hay una lista cerrada de versiones: se incorporan las nuevas versiones compatibles anunciadas por Google y se retiran las ausentes después de una actualización válida.
 
-- `gemini-3.8-flash-high`, `gemini-3.7-flash-medium`, `gemini-3.1-pro-high`, …
-- `claude-sonnet-4-6`, `claude-opus-4-6-thinking`
-- `gpt-oss-120b-medium`
+Selecciona Low, Medium o High —solo los disponibles— desde **effort** en la conversación. El plugin traduce modelo + effort al ID de inferencia real. En Claude, las rutas de razonamiento utilizan presupuestos de tokens limitados por el máximo de salida. Si existe una ruta Off, es también la predeterminada: DSH representa Off omitiendo `reasoning`. En modelos sin Off se prefiere Medium, después High y luego los demás niveles disponibles. No se sustituye silenciosamente un modelo ni se reduce el effort al rotar cuentas.
 
-The exact list shown to you is whatever your account is authorized for.
+El catálogo se consulta al iniciar, al cambiar de cuenta, cada **15 minutos** y mediante **Actualizar modelos**. La página informa origen (Google/caché), fecha, cantidad de modelos/variantes y entradas no compatibles. El refresco usa credenciales de la cuenta sin consumir el presupuesto local de solicitudes de inferencia.
+
+Una caché por cuenta/proyecto en `$DSH_HOME/dsh-agy/model-catalogs/` permite respaldo ante errores de red durante un máximo de **24 horas**. Solo guarda metadatos normalizados, no credenciales ni la respuesta completa de Google. Errores de autorización en el descubrimiento y cuentas desconectadas/revocadas invalidan el respaldo correspondiente. Una respuesta válida sin modelos compatibles deja el catálogo vacío; no resucita modelos retirados.
+
+Los IDs antiguos con sufijos siguen resolviéndose internamente si su ruta continúa disponible, pero están ocultos en el listado. Para cambiar de variante en una conversación antigua, vuelve a seleccionar la entrada base del modelo. No se modifican sesiones guardadas.
+
+**Metadatos incompletos:** no se inventan esfuerzos Gemini a partir de un simple `supportsThinking`; se usan variantes explícitas, niveles declarados o la ruta compartida conocida. Sin niveles declarados, una ruta base conserva el comportamiento predeterminado del backend. Los límites ausentes usan valores conservadores (32 768 de contexto, 8 192 de salida), y las imágenes solo se anuncian cuando Google declara su soporte. Las familias o modalidades todavía no compatibles no se publican y se contabilizan en la página.
 
 ## How it works
 

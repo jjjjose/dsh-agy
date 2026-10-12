@@ -13,8 +13,11 @@ import { DEFAULT_OAUTH_CLIENT_CONFIG_REF, resolveOAuthClientConfig, type OAuthCl
 import { refreshAccountAccess } from './token.ts'
 import { HealthTracker, TokenBucket, isCoolingDown, isRateLimited, selectAccount } from './rotation.ts'
 import { clearPool, loadPool, savePool } from './storage.ts'
-import type { RequestAuth } from './api.ts'
+import type { AuthProvider, RequestAuth } from './api.ts'
+import type { Model, StreamOptions } from '@earendil-works/pi-ai'
+import type { AntiGravityApi } from './models.ts'
 import type { DiagnosticRecord } from './diagnostics-format.ts'
+import type { CatalogIdentity } from './catalog.ts'
 import type { Account, LoginId, LoginStatus } from './types.ts'
 
 const RATE_LIMIT_WINDOW_MS = 30 * 60_000
@@ -111,6 +114,28 @@ export class AccountManager {
     return this.accounts.length > 0
   }
 
+  /** Catalog discovery does not consume inference tokens or rotate accounts. */
+  async catalogIdentity(): Promise<CatalogIdentity | undefined> {
+    await this.init()
+    const account = this.accounts.find((entry) => entry.id === this.activeId && entry.enabled)
+      ?? this.accounts.find((entry) => entry.enabled)
+    return account ? { accountId: account.id, projectId: account.projectId } : undefined
+  }
+
+  async catalogIdentities(): Promise<CatalogIdentity[]> {
+    await this.init()
+    return this.accounts.filter((entry) => entry.enabled).map((entry) => ({ accountId: entry.id, projectId: entry.projectId }))
+  }
+
+  async catalogAuth(identity: CatalogIdentity): Promise<RequestAuth> {
+    await this.init()
+    const account = this.accounts.find((entry) => entry.id === identity.accountId && entry.projectId === identity.projectId && entry.enabled)
+    if (!account) throw new Error('Antigravity catalog account is unavailable')
+    const token = await this.ensureAccess(account)
+    if (this.disposed || !account.enabled || !this.accounts.includes(account) || account.projectId !== identity.projectId) throw new Error('Antigravity catalog account changed during refresh')
+    return { ...identity, token }
+  }
+
   /** Ambient access for every account (refreshing as needed), for quota display. */
   async quotaAccounts(): Promise<Array<{ id: string; email?: string; enabled: boolean; projectId: string; access: string }>> {
     await this.init()
@@ -199,12 +224,13 @@ export class AccountManager {
       this.activeId = undefined
       await clearPool()
       await this.options.credentials.unset(this.options.credentialRef)
+      this.accountsChanged?.()
       return
     }
     this.accounts = this.accounts.filter((a) => a.id !== accountId)
     if (this.activeId === accountId) this.activeId = this.accounts[0]?.id
     await this.persist()
-    if (this.accounts.length === 0) await this.options.credentials.unset(this.options.credentialRef)
+    if (this.accounts.length === 0) { await this.options.credentials.unset(this.options.credentialRef); this.accountsChanged?.() }
     else await this.mirrorActive()
   }
 
@@ -282,6 +308,7 @@ export class AccountManager {
       delete account.accessExpires
       await this.persist()
       if (this.activeId === account.id) await this.options.credentials.unset(this.options.credentialRef)
+      this.accountsChanged?.()
       throw new Error(`Antigravity account ${account.email ?? account.id.slice(0, 8)} was revoked; sign in again.`)
     }
     if (result.kind === 'error') {
@@ -319,14 +346,37 @@ export class AccountManager {
 
   reportDiagnostic?: (diagnostic: { model: string; finishReason?: string; kind: string; toolCount?: number }) => void
   reportLog?: (entry: DiagnosticRecord) => void
+  resolveModel?: AuthProvider['resolveModel']
+  accountsChanged?: () => void
 
   /** Get a distinct account's auth after `accountId` was rate-limited. */
-  async afterRateLimit(accountId: string): Promise<RequestAuth | undefined> {
+  async afterRateLimit(accountId: string, model?: Model<AntiGravityApi>, options?: StreamOptions): Promise<RequestAuth | undefined> {
+    const excluded = new Set([accountId])
+    if (model && this.resolveModel) {
+      await this.init()
+      for (const account of this.accounts.filter((entry) => entry.enabled && entry.id !== accountId)) {
+        try {
+          const auth = await this.catalogAuth({ accountId: account.id, projectId: account.projectId })
+          await this.resolveModel(model, options ?? {}, auth, options?.signal)
+        } catch {
+          options?.signal?.throwIfAborted()
+          excluded.add(account.id)
+        }
+      }
+      if (this.accounts.every((entry) => !entry.enabled || excluded.has(entry.id))) {
+        throw new Error(`No alternative Antigravity account supports model ${model.id} with the selected effort right now.`)
+      }
+    }
     try {
-      return await this.resolveAuth(new Set([accountId]))
+      return await this.resolveAuth(excluded)
     } catch {
       return undefined
     }
+  }
+
+  /** Capability mismatch is not a rate limit and must not penalize the account. */
+  afterModelUnavailable(accountId: string, model: Model<AntiGravityApi>, options: StreamOptions): Promise<RequestAuth | undefined> {
+    return this.afterRateLimit(accountId, model, options)
   }
 
   /** Resolve pi-ai request auth (single active account, rotation applied). */
@@ -378,6 +428,7 @@ export class AccountManager {
     const account = this.accounts.find((a) => a.id === this.activeId)
     if (!account || !account.enabled) {
       await this.options.credentials.unset(this.options.credentialRef)
+      this.accountsChanged?.()
       return
     }
     const mirror: OAuthCredential = {
@@ -389,5 +440,6 @@ export class AccountManager {
       ...account.email === undefined ? {} : { email: account.email },
     } as OAuthCredential
     await this.options.credentials.set(this.options.credentialRef, JSON.stringify(mirror))
+    this.accountsChanged?.()
   }
 }

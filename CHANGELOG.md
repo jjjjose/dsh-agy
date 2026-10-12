@@ -4,11 +4,16 @@
 
 ### Añadido
 
+- Catálogo dinámico por cuenta/proyecto: descubre nuevas versiones compatibles, actualiza cada 15 minutos y conserva un respaldo normalizado en disco de hasta 24 horas ante errores de red.
+- Estado del catálogo en la interfaz: origen, fecha, modelos, variantes y entradas no compatibles. El refresco manual devuelve su resultado real.
+- Diagnóstico del catálogo y de la ruta de inferencia resuelta según effort, sin credenciales.
 - Switch de logs de diagnóstico seguro con preferencia persistente, historial en memoria de hasta 200 entradas, actualización periódica, copiado y limpieza desde la página del plugin.
 - Eventos correlacionados por solicitud: inicio, HTTP, red, reintentos, rotación, conversión de esquemas, finalización y cancelación; sin credenciales ni contenido de conversaciones.
 
 ### Corregido
 
+- Una entrada por modelo/versión en el selector; variantes disponibles elegidas mediante el effort nativo de DSH y traducidas al ID real de Antigravity. IDs anteriores conservados como alias internos ocultos.
+- Validación de modelo/effort contra la cuenta que envía la solicitud, incluida la rotación, sin sustituir modelos ni bajar el esfuerzo silenciosamente. Respuestas tardías de otra cuenta no reemplazan el catálogo activo.
 - Esquemas de herramientas: conservar alternativas de `oneOf` mediante `anyOf`, normalizar uniones anulables y resolver referencias locales antes de eliminar definiciones. La conversión no modifica el catálogo original.
 - Informar herramienta y ubicación para referencias no resolubles, recursión y composiciones que no pueden representarse de forma segura, en lugar de eliminar sus restricciones silenciosamente.
 - Incluir `finishMessage` del backend en el error de generación (limitado a 1000 caracteres), sin persistirlo en las estadísticas. Los diagnósticos de conversión y finalización incluyen la cantidad de herramientas.

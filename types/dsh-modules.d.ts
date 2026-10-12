@@ -77,6 +77,7 @@ declare module '@deepseek-ai/dsh-llm-pi-ai' {
   /** Generic adapter bridging a pi-ai provider to the Harness LLM service. */
   export class PiAiAdapter {
     constructor(options: PiAiAdapterOptions)
+    listModels(provider: string): Promise<Array<{ provider: string; id: string; name: string; inputModalities: string[] }>>
   }
 }
 
