@@ -59,7 +59,11 @@ Las pruebas automatizadas cubren nuevas versiones ficticias, agrupación, alias,
 
 ### Regresión de `MALFORMED_FUNCTION_CALL`
 
-Si aparece `toolCount=0` y Gemini intenta llamar a `bash`, comprobar el evento `adapter-tools`: registra la cantidad recibida de DSH y cuántas declaraciones llevaban `deferLoading`, sin registrar nombres ni esquemas. El adaptador entrega esas declaraciones explícitamente al protocolo de Antigravity; no recupera herramientas ausentes del request. Si también `adapter-tools` indica cero, revisar la presentación/habilitación de herramientas del agente en DSH. En solicitudes realmente sin herramientas, el transporte envía `functionCallingConfig.mode=NONE` para impedir llamadas a funciones no declaradas.
+Comparar `adapter-tools`, `request-start` y `request-built` con el mismo requestId. El primero cuenta las declaraciones recibidas del host; el segundo, las herramientas activas del transcript; el tercero, las declaraciones del envelope final. En pi-ai 1.x, las herramientas ya no llegan en `context.tools`: están en mensajes de sistema como `toolsAdded`/`toolsRemoved`. El plugin 0.2.2 recupera ese catálogo y el prompt con las utilidades oficiales. No promociona herramientas diferidas por su cuenta. Si DSH ya entrega cero herramientas, revisar la presentación/habilitación del agente. `mode=NONE` solo se usa con un catálogo efectivo vacío.
+
+Prueba real realizada con Gemini 3.8 Flash High: una llamada a `list_directory_files` declarada sobre un directorio sintético, sin ejecutar su contenido, seguida de una continuación con resultado sintético. Ambas finalizaron correctamente. La consulta real del catálogo devolvió 1 048 576 de contexto y 65 536 de salida. Falta verificar el catálogo completo del agente desde la interfaz de DSH Desktop.
+
+Tras instalar 0.2.2, reiniciar DSH, pulsar **Actualizar modelos** y comprobar el detalle de capacidades. La caché v1 se invalida, no se reinterpreta como metadatos confirmados. Una capacidad ausente debe mostrarse como desconocida/respaldo y no rebajar valores conocidos de otras variantes.
 
 En sesiones nuevas con `gemini-3.8-flash` y effort High, si están disponibles, repetir el mismo prompt con herramientas básicas, con cada MCP por separado y con el catálogo completo. Verificar una llamada válida, su resultado y una segunda llamada en la misma conversación. Repetir con Claude si está disponible.
 

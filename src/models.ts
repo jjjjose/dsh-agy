@@ -14,9 +14,7 @@ export const PROVIDER = 'google-antigravity'
 
 const NO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 type Family = 'gemini' | 'claude' | 'gpt'
-function descriptor(id: string, name: string, family: Family): Model<AntiGravityApi> {
-  const contextWindow = family === 'gemini' ? 1_048_576 : family === 'claude' ? 200_000 : 131_072
-  const output = family === 'gpt' ? 8_192 : family === 'claude' ? 64_000 : 65_536
+function descriptor(id: string, name: string): Model<AntiGravityApi> {
   return {
     id,
     name,
@@ -33,15 +31,26 @@ function descriptor(id: string, name: string, family: Family): Model<AntiGravity
       xhigh: null,
       max: null,
     },
-    input: ['text', 'image'],
+    input: ['text'],
     cost: NO_COST,
-    contextWindow,
-    maxTokens: output,
+    contextWindow: 32768,
+    maxTokens: 8192,
   }
 }
 
 export const EFFORTS: readonly ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
-export interface ModelRoute { id: string; thinking?: Record<string, unknown> }
+export interface CapabilityLimit {
+  value: number
+  source: 'google' | 'cache' | 'fallback'
+  verifiedAt?: number
+}
+export interface ModelCapabilities {
+  contextWindow: CapabilityLimit
+  maxOutputTokens: CapabilityLimit
+  supportsImages?: boolean
+  supportsVideo?: boolean
+}
+export interface ModelRoute { id: string; thinking?: Record<string, unknown>; capabilities?: ModelCapabilities }
 export class ModelSelectionError extends Error {}
 export interface DynamicModel extends Model<AntiGravityApi> {
   antigravity: { routes: Partial<Record<ThinkingLevel | 'default', ModelRoute>>; aliases: Record<string, ThinkingLevel | 'default'>; defaultEffort: ThinkingLevel | 'default' }
@@ -54,6 +63,8 @@ export interface CatalogStatus {
   ignoredCount: number
   refreshing: boolean
   error?: string
+  models: Array<{ id: string; name: string; contextWindow: CapabilityLimit; maxOutputTokens: CapabilityLimit;
+    variants: Array<{ effort: string; id: string; capabilities: ModelCapabilities }> }>
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -66,10 +77,69 @@ function identity(id: string): { base: string; family: Family; effort?: Thinking
   if (/image|imagen|embedding|tts|audio|video/i.test(id)) return undefined
   const family: Family | undefined = /^gemini-\d/.test(id) ? 'gemini' : /^claude-(?:sonnet|opus|haiku)-/.test(id) ? 'claude' : /^gpt-oss-\d+b/i.test(id) ? 'gpt' : undefined
   if (!family) return undefined
-  const suffix = /-(off|minimal|low|medium|high|xhigh|max)$/.exec(id)
+  const suffix = /-(extra-low|off|minimal|low|medium|high|xhigh|max)$/.exec(id)
   const withoutEffort = suffix ? id.slice(0, -suffix[0].length) : id
   const thinking = family === 'claude' && withoutEffort.endsWith('-thinking')
-  return { base: thinking ? withoutEffort.slice(0, -9) : withoutEffort, family, effort: suffix?.[1] as ThinkingLevel | undefined, thinking }
+  return { base: thinking ? withoutEffort.slice(0, -9) : withoutEffort, family, effort: (suffix?.[1] === 'extra-low' ? 'minimal' : suffix?.[1]) as ThinkingLevel | undefined, thinking }
+}
+
+/** Antigravity uses maxTokens for INPUT/context, never for max output. */
+function capabilities(entry: Record<string, unknown>, source: 'google' | 'cache', now: number): ModelCapabilities {
+  const cached = source === 'cache' && record(entry.capabilities) ? entry.capabilities : undefined
+  const limit = (name: string, value: number | undefined, fallback: number): CapabilityLimit => {
+    const stored = cached?.[name]
+    if (record(stored) && positive(stored.value) && ['google', 'cache'].includes(String(stored.source))
+      && typeof stored.verifiedAt === 'number' && stored.verifiedAt <= now && now - stored.verifiedAt <= 24 * 60 * 60_000) {
+      return { value: stored.value as number, source: 'cache', verifiedAt: stored.verifiedAt }
+    }
+    // Cache v2 must not turn an operational fallback into a confirmed limit.
+    if (source === 'cache') return { value: fallback, source: 'fallback' }
+    return value === undefined ? { value: fallback, source: 'fallback' } : { value, source: 'google', verifiedAt: now }
+  }
+  return {
+    contextWindow: limit('contextWindow', positive(entry.contextWindow) ?? positive(entry.maxInputTokens) ?? positive(entry.inputTokenLimit) ?? positive(entry.maxTokens), 32768),
+    maxOutputTokens: limit('maxOutputTokens', positive(entry.maxOutputTokens) ?? positive(entry.outputTokenLimit), 8192),
+    ...typeof entry.supportsImages === 'boolean' ? { supportsImages: entry.supportsImages } : {},
+    ...typeof entry.supportsVideo === 'boolean' ? { supportsVideo: entry.supportsVideo } : {},
+  }
+}
+
+export function modelLimits(model: DynamicModel): { contextWindow: CapabilityLimit; maxOutputTokens: CapabilityLimit } {
+  const routes = Object.values(model.antigravity.routes)
+  const smallest = (field: 'contextWindow' | 'maxOutputTokens', fallback: number): CapabilityLimit => {
+    const known = routes.map((route) => route?.capabilities?.[field]).filter((value): value is CapabilityLimit => !!value && value.source !== 'fallback')
+    return known.sort((a, b) => a.value - b.value)[0] ?? { value: fallback, source: 'fallback' }
+  }
+  return { contextWindow: smallest('contextWindow', 32768), maxOutputTokens: smallest('maxOutputTokens', 8192) }
+}
+
+export function applyModelCapabilities(model: DynamicModel): void {
+  const limits = modelLimits(model)
+  model.contextWindow = limits.contextWindow.value
+  model.maxTokens = limits.maxOutputTokens.value
+  model.input = Object.values(model.antigravity.routes).every((route) => route?.capabilities?.supportsImages === true) ? ['text', 'image'] : ['text']
+}
+
+/** Preserve still-fresh confirmed limits for the same account and wire route. */
+export function retainModelCapabilities(models: readonly DynamicModel[], previous: readonly DynamicModel[], now: number): DynamicModel[] {
+  const prior = new Map(previous.flatMap((model) => Object.values(model.antigravity.routes).map((route) => [route!.id, route!.capabilities] as const)))
+  return models.map((model) => {
+    const routes = Object.fromEntries(Object.entries(model.antigravity.routes).map(([effort, route]) => {
+      const old = prior.get(route.id)
+      const caps = route.capabilities
+      if (!caps) return [effort, route]
+      const keep = (field: 'contextWindow' | 'maxOutputTokens'): CapabilityLimit => {
+        const last = old?.[field]
+        if (caps[field].source !== 'fallback') return { ...caps[field], verifiedAt: now }
+        return last && last.source !== 'fallback' && last.verifiedAt !== undefined && now >= last.verifiedAt && now - last.verifiedAt <= 24 * 60 * 60_000
+          ? { ...last, source: 'cache' } : caps[field]
+      }
+      return [effort, { ...route, capabilities: { ...caps, contextWindow: keep('contextWindow'), maxOutputTokens: keep('maxOutputTokens') } }]
+    }))
+    const result = { ...model, antigravity: { ...model.antigravity, routes } }
+    applyModelCapabilities(result)
+    return result
+  })
 }
 
 function modelName(id: string): string {
@@ -89,41 +159,52 @@ function routeFor(id: string, family: Family, effort: ThinkingLevel | 'default',
 }
 
 /** Parse all compatible versions returned by Google, not a fixed allowlist. */
-export function parseModelCatalog(payload: unknown): { models: DynamicModel[]; ignoredCount: number } {
+export function parseModelCatalog(payload: unknown, source: 'google' | 'cache' = 'google', now = Date.now()): { models: DynamicModel[]; ignoredCount: number } {
   if (!record(payload) || !record(payload.models)) throw new Error('Antigravity model response must contain a models object')
   if (Object.keys(payload.models).length > 2000) throw new Error('Antigravity model catalog is too large')
   const groups = new Map<string, DynamicModel>()
   let ignoredCount = 0
+  const hidden = new Set(Array.isArray(payload.tieredModelIds) ? payload.tieredModelIds : [])
   // Sort for deterministic results even when Google's object order changes.
   for (const [id, entry] of Object.entries(payload.models).sort(([a], [b]) => a.localeCompare(b))) {
-    const info = validId(id) ? identity(id) : undefined
+    let info = validId(id) ? identity(id) : undefined
+    // Some agent routes have opaque aliases. Recover a versioned identity only
+    // from an unambiguous Google display name; retain the original wire ID.
+    if (!info && validId(id) && id.startsWith('gemini-') && record(entry) && typeof entry.displayName === 'string') {
+      const named = /^Gemini (\d+(?:\.\d+)?) (Flash|Pro)(?: \((Low|Medium|High)\))?$/.exec(entry.displayName)
+      if (named) info = { base: `gemini-${named[1]}-${named[2]!.toLowerCase()}`, family: 'gemini', thinking: false,
+        effort: named[3]?.toLowerCase() as ThinkingLevel | undefined }
+    }
     // The known shared backend route represents both 3.5 Flash effort variants.
     const shared = id === 'gemini-3-flash-agent'
-    if ((!info && !shared) || !record(entry)) { ignoredCount++; continue }
+    if ((!info && !shared) || !record(entry) || entry.isInternal === true || hidden.has(id) || id.endsWith('-tiered')) { ignoredCount++; continue }
     const base = shared ? 'gemini-3.5-flash' : info!.base
     const family = shared ? 'gemini' : info!.family
     let group = groups.get(base)
     if (!group) {
       const display = typeof entry.displayName === 'string' ? entry.displayName.replace(/\s*\((?:off|minimal|low|medium|high|xhigh|max|thinking)\)\s*$/i, '').replace(/\s+(?:low|medium|high)\s*$/i, '').trim().slice(0, 160) : ''
-      group = { ...descriptor(base, display || modelName(base), family), reasoning: false,
-        // Missing limits use conservative adapter defaults, not claimed capabilities.
-        contextWindow: positive(entry.contextWindow) ?? positive(entry.maxInputTokens) ?? 32768,
-        maxTokens: positive(entry.maxOutputTokens) ?? positive(entry.maxTokens) ?? 8192,
-        input: entry.supportsImages === true ? ['text', 'image'] : ['text'],
+      group = { ...descriptor(base, display || modelName(base)), reasoning: false,
         antigravity: { routes: {}, aliases: {}, defaultEffort: 'default' } }
       groups.set(base, group)
     }
-    // Group limits/modalities are safe for every route in the group.
-    group.contextWindow = Math.min(group.contextWindow, positive(entry.contextWindow) ?? positive(entry.maxInputTokens) ?? 32768)
-    group.maxTokens = Math.min(group.maxTokens, positive(entry.maxOutputTokens) ?? positive(entry.maxTokens) ?? 8192)
-    if (entry.supportsImages !== true) group.input = ['text']
+    const caps = capabilities(entry, source, now)
     const thinking = info?.thinking === true || (family === 'claude' && entry.supportsThinking === true)
     const declared = Array.isArray(entry.supportedThinkingLevels) ? entry.supportedThinkingLevels.filter((level): level is ThinkingLevel => EFFORTS.includes(level as ThinkingLevel)) : []
     const levels: Array<ThinkingLevel | 'default'> = shared ? ['medium', 'high'] : info?.effort ? [info.effort]
       : declared.length ? declared : thinking ? ['low', 'medium', 'high', 'xhigh', 'max'] : [family === 'claude' && entry.supportsThinking !== true ? 'off' : 'default']
     for (const level of levels) {
       // A concrete variant wins over a shared route/metadata-derived alternative.
-      if (!group.antigravity.routes[level] || info?.effort) group.antigravity.routes[level] = routeFor(id, family, level, thinking)
+      if (!group.antigravity.routes[level] || (info?.effort && identity(id)?.effort)) {
+        const route = routeFor(id, family, level, thinking)
+        // Google's extra-low route declares a budget, not a "minimal" enum.
+        if (id.endsWith('-extra-low') && typeof entry.thinkingBudget === 'number' && entry.thinkingBudget >= 0) {
+          route.thinking = { includeThoughts: true, thinkingBudget: entry.thinkingBudget }
+        }
+        if (level === 'default' && entry.supportsThinking === true && typeof entry.thinkingBudget === 'number' && (entry.thinkingBudget === -1 || entry.thinkingBudget >= 0)) {
+          route.thinking = { includeThoughts: entry.thinkingBudget !== 0, thinkingBudget: entry.thinkingBudget }
+        }
+        group.antigravity.routes[level] = { ...route, capabilities: caps }
+      }
     }
     group.antigravity.aliases[id] = info?.effort ?? (thinking ? 'high' : levels[0]!)
     if (shared) {
@@ -132,7 +213,16 @@ export function parseModelCatalog(payload: unknown): { models: DynamicModel[]; i
     }
   }
   for (const group of groups.values()) {
+    applyModelCapabilities(group)
     const routes = group.antigravity.routes
+    const cachedAliases = source === 'cache' && record(payload.aliases) ? payload.aliases[group.id] : undefined
+    if (record(cachedAliases)) {
+      for (const [alias, effort] of Object.entries(cachedAliases).slice(0, 2000)) {
+        if (validId(alias) && typeof effort === 'string' && (effort === 'default' || EFFORTS.includes(effort as ThinkingLevel)) && routes[effort as ThinkingLevel | 'default']) {
+          group.antigravity.aliases[alias] = effort as ThinkingLevel | 'default'
+        }
+      }
+    }
     // DSH translates explicit Off into an omitted reasoning option. Therefore
     // an offered Off route must also be the provider default, or Off would think.
     group.antigravity.defaultEffort = (['off', 'medium', 'high', 'low', 'xhigh', 'max', 'minimal', 'default'] as const).find((level) => routes[level])!
@@ -171,7 +261,10 @@ export function withLegacyAliases(models: readonly DynamicModel[]): DynamicModel
     if (ids.has(alias)) continue
     ids.add(alias)
     const offered = effort === 'default' ? [] : [effort]
+    const route = model.antigravity.routes[effort]
     result.push({ ...model, id: alias, reasoning: offered.some((level) => level !== 'off'),
+      contextWindow: route?.capabilities?.contextWindow.value ?? model.contextWindow,
+      maxTokens: route?.capabilities?.maxOutputTokens.value ?? model.maxTokens,
       thinkingLevelMap: Object.fromEntries(EFFORTS.map((level) => [level, offered.includes(level) ? level : null])),
       antigravity: { ...model.antigravity, defaultEffort: effort } })
   }

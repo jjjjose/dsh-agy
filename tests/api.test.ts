@@ -240,7 +240,7 @@ describe('tool transport', () => {
     expect(events.filter((type) => type === 'toolcall_end')).toHaveLength(2)
     expect(message.usage.totalTokens).toBe(30)
     expect(auth.reportSuccess).toHaveBeenCalledWith('a')
-    expect(auth.reportLog.mock.calls.map(([entry]) => entry.event)).toEqual(['request-start', 'model-resolved', 'http-response', 'generation-finish', 'request-complete'])
+    expect(auth.reportLog.mock.calls.map(([entry]) => entry.event)).toEqual(['request-start', 'model-resolved', 'request-built', 'http-response', 'generation-finish', 'request-complete'])
     const requestId = auth.reportLog.mock.calls[0]![0].requestId
     expect(auth.reportLog.mock.calls.every(([entry]) => entry.requestId === requestId)).toBe(true)
     expect(JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string).requestId).toBe(requestId)
@@ -249,8 +249,8 @@ describe('tool transport', () => {
     const context: Context = { tools, messages: [message, ...calls.map((call) => ({ role: 'toolResult' as const, toolCallId: call.id, toolName: call.name, content: [{ type: 'text' as const, text: call.name === 'glob' ? 'src/api.ts' : '/repo' }], isError: false, timestamp: 0 }))] }
     const request = buildEnvelope(model, context, {}, 'p').request as { contents: unknown[] }
     expect(request.contents).toEqual([
-      { role: 'model', parts: [{ functionCall: { name: 'working_directory', args: {} }, thoughtSignature: 'c2ln' }, { functionCall: { name: 'glob', args: { pattern: '**/*.ts' } } }] },
-      { role: 'user', parts: [{ functionResponse: { name: 'working_directory', response: { output: '/repo' } } }, { functionResponse: { name: 'glob', response: { output: 'src/api.ts' } } }] },
+      { role: 'model', parts: [{ functionCall: { id: calls[0]!.id, name: 'working_directory', args: {} }, thoughtSignature: 'c2ln' }, { functionCall: { id: calls[1]!.id, name: 'glob', args: { pattern: '**/*.ts' } } }] },
+      { role: 'user', parts: [{ functionResponse: { id: calls[0]!.id, name: 'working_directory', response: { output: '/repo' } } }, { functionResponse: { id: calls[1]!.id, name: 'glob', response: { output: 'src/api.ts' } } }] },
     ])
   })
 

@@ -402,6 +402,18 @@ function ModelCatalogPanel(): React.ReactElement {
     <Row title="Modelos disponibles" desc={state ? `${state.modelCount} modelos · ${state.variantCount} variantes · ${state.source === 'google' ? 'Google' : state.source === 'cache' ? 'Caché' : 'Sin catálogo disponible'}${state.updatedAt ? ` · Actualizado: ${new Date(state.updatedAt).toLocaleString()}` : ''}` : 'Consultando catálogo…'} controls={<Button disabled={busy || state?.refreshing} onClick={() => { void refresh() }}>{busy || state?.refreshing ? 'Actualizando…' : 'Actualizar modelos'}</Button>} />
     <p className="agy-note">Una entrada por modelo y versión. Selecciona la variante desde effort en la conversación. Actualización automática cada 15 minutos y al cambiar de cuenta.</p>
     {state?.ignoredCount ? <p className="agy-note">{state.ignoredCount} entradas de Google no publicadas por formato o familia no compatible.</p> : null}
+    {state?.models?.length ? <details>
+      <summary>Contexto, salida y variantes por modelo</summary>
+      <p className="agy-note">Google = confirmado por Antigravity. Caché = último dato confirmado. Desconocido = límite operativo de respaldo, no capacidad anunciada. Si las variantes difieren, DSH muestra el menor límite conocido; cada solicitud usa el límite de su ruta.</p>
+      {state.models.map((model) => <div key={model.id}>
+        <strong>{model.name}</strong>
+        {model.variants.map((variant) => <p className="agy-note" key={variant.effort}>
+          {variant.effort} · contexto: {variant.capabilities.contextWindow.value.toLocaleString()} ({variant.capabilities.contextWindow.source === 'fallback' ? 'desconocido; respaldo' : variant.capabilities.contextWindow.source === 'cache' ? 'caché' : 'Google'})
+          {' · '}salida: {variant.capabilities.maxOutputTokens.value.toLocaleString()} ({variant.capabilities.maxOutputTokens.source === 'fallback' ? 'desconocido; respaldo' : variant.capabilities.maxOutputTokens.source === 'cache' ? 'caché' : 'Google'})
+          {' · '}imágenes: {variant.capabilities.supportsImages === undefined ? 'desconocido' : variant.capabilities.supportsImages ? 'sí' : 'no'}
+        </p>)}
+      </div>)}
+    </details> : null}
     {state?.error ? <p className="agy-error" role="alert">{state.error}</p> : null}
     {error ? <p className="agy-error" role="alert">{error}</p> : null}
   </div>

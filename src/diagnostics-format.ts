@@ -1,11 +1,15 @@
 /** Shared, browser-safe diagnostic types and report formatting. No payloads. */
-export type DiagnosticEvent = 'adapter-tools' | 'request-start' | 'http-response' | 'network-error' | 'endpoint-retry' | 'account-rotation' | 'schema-error' | 'generation-finish' | 'request-complete' | 'request-error' | 'request-aborted' | 'model-resolved' | 'model-unavailable' | 'catalog-refresh' | 'catalog-updated' | 'catalog-error' | 'catalog-cache' | 'catalog-cache-write-error'
+export type DiagnosticEvent = 'request-built' | 'adapter-tools' | 'request-start' | 'http-response' | 'network-error' | 'endpoint-retry' | 'account-rotation' | 'schema-error' | 'generation-finish' | 'request-complete' | 'request-error' | 'request-aborted' | 'model-resolved' | 'model-unavailable' | 'catalog-refresh' | 'catalog-updated' | 'catalog-error' | 'catalog-cache' | 'catalog-cache-write-error'
 export interface DiagnosticRecord {
   requestId: string
   model: string
   event: DiagnosticEvent
   toolCount?: number
   deferredToolCount?: number
+  contextWindow?: number
+  maxOutputTokens?: number
+  contextSource?: 'google' | 'cache' | 'fallback'
+  outputSource?: 'google' | 'cache' | 'fallback'
   durationMs?: number
   status?: number
   attempt?: number

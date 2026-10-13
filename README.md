@@ -23,6 +23,7 @@ Sign in with your Google account and use the models from your **Antigravity Codi
 ### Requisitos
 
 - **DeepSeek Harness 0.2.1-alpha.2**, versión objetivo actual de las dependencias del host.
+- El host debe proporcionar **`@earendil-works/pi-ai` 1.x** (validado con 1.0.2); el transporte consume su formato de transcript, no los campos antiguos de contexto.
 - Cuenta Google con acceso a **Antigravity** e Internet para autorizarla.
 - `pnpm` disponible para el instalador de plugins de DSH. Si el instalador no lo encuentra, instala pnpm siguiendo su documentación y reinicia DSH.
 
@@ -160,7 +161,11 @@ Una caché por cuenta/proyecto en `$DSH_HOME/dsh-agy/model-catalogs/` permite re
 
 Los IDs antiguos con sufijos siguen resolviéndose internamente si su ruta continúa disponible, pero están ocultos en el listado. Para cambiar de variante en una conversación antigua, vuelve a seleccionar la entrada base del modelo. No se modifican sesiones guardadas.
 
-**Metadatos incompletos:** no se inventan esfuerzos Gemini a partir de un simple `supportsThinking`; se usan variantes explícitas, niveles declarados o la ruta compartida conocida. Sin niveles declarados, una ruta base conserva el comportamiento predeterminado del backend. Los límites ausentes usan valores conservadores (32 768 de contexto, 8 192 de salida), y las imágenes solo se anuncian cuando Google declara su soporte. Las familias o modalidades todavía no compatibles no se publican y se contabilizan en la página.
+**Capacidades dinámicas:** `fetchAvailableModels` informa `maxTokens` como contexto y `maxOutputTokens` como salida. Consulta real de Gemini 3.8 Flash: **1 048 576 de contexto y 65 536 de salida**. La página muestra esos límites por variante y su origen (Google/caché/respaldo). No se necesita una lista fija de versiones ni otra consulta por modelo para esos campos.
+
+**Metadatos incompletos:** no se inventan esfuerzos Gemini a partir de un simple `supportsThinking`; se usan variantes explícitas, niveles declarados o la ruta compartida conocida. Sin niveles declarados, una ruta base conserva el comportamiento predeterminado del backend. Se conservan datos confirmados de la misma cuenta/ruta hasta 24 horas desde su verificación original. Si siguen sin existir, los valores operativos 32 768/8 192 se etiquetan como **desconocidos/respaldo**, no como límites anunciados. Una variante sin metadatos no reduce los límites conocidos de las otras. Si difieren, DSH muestra el menor límite conocido del grupo y la solicitud aplica el de su ruta; el host no cambia la ventana del selector al elegir effort. Las imágenes solo se anuncian cuando Google declara su soporte. Las familias o modalidades todavía no compatibles no se publican y se contabilizan en la página.
+
+La caché v1 se invalida automáticamente: sus valores sintetizados no se reutilizan como capacidades confirmadas. Después de actualizar a 0.2.2, pulsa **Actualizar modelos** para reconstruirla.
 
 ## How it works
 

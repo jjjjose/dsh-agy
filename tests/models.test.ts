@@ -20,7 +20,7 @@ describe('dynamic model grouping and effort routing', () => {
     expect(flash.name).toBe('Gemini 9.2 Flash')
     expect(flash.provider).toBe(PROVIDER)
     expect(flash.thinkingLevelMap).toEqual({ off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: null, max: null })
-    expect(selectModelRoute(flash, 'low')).toEqual({ id: 'gemini-9.2-flash-low', thinking: { includeThoughts: true, thinkingLevel: 'low' } })
+    expect(selectModelRoute(flash, 'low')).toMatchObject({ id: 'gemini-9.2-flash-low', thinking: { includeThoughts: true, thinkingLevel: 'low' } })
     expect(selectModelRoute(flash).id).toBe('gemini-9.2-flash-medium')
     const pro = models.find((model) => model.id === 'gemini-9.1-pro')!
     expect(pro.thinkingLevelMap?.medium).toBeNull()
@@ -39,7 +39,7 @@ describe('dynamic model grouping and effort routing', () => {
     const models = parseAvailableModels({ models: { 'gemini-3-flash-agent': { displayName: 'Gemini 3.5 Flash (High)' }, 'gemini-3.5-flash-low': {} } })
     expect(models).toHaveLength(1)
     expect(models[0]!.name).toBe('Gemini 3.5 Flash')
-    expect(selectModelRoute(models[0]!, 'medium')).toEqual({ id: 'gemini-3-flash-agent', thinking: { includeThoughts: true, thinkingLevel: 'medium' } })
+    expect(selectModelRoute(models[0]!, 'medium')).toMatchObject({ id: 'gemini-3-flash-agent', thinking: { includeThoughts: true, thinkingLevel: 'medium' } })
     expect(selectModelRoute(models[0]!, 'high').id).toBe('gemini-3-flash-agent')
     expect(selectModelRoute(models[0]!, 'low').id).toBe('gemini-3.5-flash-low')
   })
@@ -85,8 +85,8 @@ describe('dynamic model grouping and effort routing', () => {
   it('routes Claude thinking via budgets and off via the plain route', () => {
     const model = parseAvailableModels({ models: { 'claude-sonnet-5-1-thinking': { maxOutputTokens: 64000 }, 'claude-sonnet-5-1': { maxOutputTokens: 64000 } } })[0]!
     expect(model.name).toBe('Claude Sonnet 5.1')
-    expect(selectModelRoute(model, 'off')).toEqual({ id: 'claude-sonnet-5-1' })
-    expect(selectModelRoute(model)).toEqual({ id: 'claude-sonnet-5-1' }) // DSH omits reasoning for Off.
+    expect(selectModelRoute(model, 'off')).toMatchObject({ id: 'claude-sonnet-5-1' })
+    expect(selectModelRoute(model)).toMatchObject({ id: 'claude-sonnet-5-1' }) // DSH omits reasoning for Off.
     const high = buildEnvelope(model, { messages: [] }, { reasoning: 'high' }, 'p')
     expect(high.model).toBe('claude-sonnet-5-1-thinking')
     expect(high.request).toMatchObject({ generationConfig: { thinkingConfig: { includeThoughts: true, thinkingBudget: 32768 } } })
@@ -99,5 +99,42 @@ describe('dynamic model grouping and effort routing', () => {
     expect(parsed.ignoredCount).toBe(3)
     expect(parseAvailableModels({ models: {} })).toEqual([])
     for (const invalid of [{}, null, { models: [] }]) expect(() => parseAvailableModels(invalid)).toThrow('models object')
+  })
+
+  it('reads the actual Antigravity maxTokens/maxOutputTokens contract', () => {
+    const model = parseAvailableModels({ models: {
+      'gemini-3.8-flash-high': { maxTokens: 1048576, maxOutputTokens: 65536, supportsImages: true, supportsVideo: true },
+      'gemini-3.8-flash-low': { maxTokens: 1048576, maxOutputTokens: 65536, supportsImages: true },
+    } })[0]!
+    expect(model).toMatchObject({ contextWindow: 1048576, maxTokens: 65536, input: ['text', 'image'] })
+    expect(selectModelRoute(model, 'high').capabilities).toMatchObject({ contextWindow: { value: 1048576, source: 'google' }, maxOutputTokens: { value: 65536, source: 'google' }, supportsVideo: true })
+  })
+
+  it('does not lower known limits because a sibling variant omits metadata', () => {
+    const model = parseAvailableModels({ models: { 'gemini-9.2-pro-low': {}, 'gemini-9.2-pro-high': { maxTokens: 1048576, maxOutputTokens: 65536 } } })[0]!
+    expect(model).toMatchObject({ contextWindow: 1048576, maxTokens: 65536 })
+    expect(selectModelRoute(model, 'low').capabilities?.contextWindow.source).toBe('fallback')
+    expect(selectModelRoute(model, 'high').capabilities?.contextWindow.source).toBe('google')
+    expect(buildEnvelope(model, { messages: [] }, { reasoning: 'low' }, 'p').request).toMatchObject({ generationConfig: { maxOutputTokens: 8192 } })
+  })
+
+  it('does not interpret context maxTokens as output or publish tiered duplicates', () => {
+    const models = parseAvailableModels({ tieredModelIds: ['gemini-9.2-flash-tiered'], models: {
+      'gemini-9.2-flash-high': { maxTokens: 1048576 }, 'gemini-9.2-flash-tiered': {},
+      'gemini-9.2-flash-extra-low': { maxTokens: 1048576 },
+    } })
+    expect(models).toHaveLength(1)
+    expect(models[0]).toMatchObject({ contextWindow: 1048576, maxTokens: 8192 })
+    expect(selectModelRoute(models[0]!, 'minimal').id).toBe('gemini-9.2-flash-extra-low')
+  })
+
+  it('groups opaque agent aliases from explicit Google names without replacing concrete routes', () => {
+    const model = parseAvailableModels({ models: {
+      'gemini-pro-agent': { displayName: 'Gemini 3.1 Pro (High)', maxTokens: 1048576, maxOutputTokens: 65536 },
+      'gemini-3.1-pro-high': { displayName: 'Gemini 3.1 Pro (High)', maxTokens: 1048576, maxOutputTokens: 65536 },
+    } })[0]!
+    expect(model.id).toBe('gemini-3.1-pro')
+    expect(selectModelRoute(model, 'high').id).toBe('gemini-3.1-pro-high')
+    expect(withLegacyAliases([model]).find((item) => item.id === 'gemini-pro-agent')).toBeDefined()
   })
 })

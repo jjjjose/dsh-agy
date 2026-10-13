@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { stateDir } from './storage.ts'
 import type { DiagnosticEntry, DiagnosticRecord, DiagnosticSnapshot } from './diagnostics-format.ts'
 
-const EVENTS = new Set(['adapter-tools', 'request-start', 'http-response', 'network-error', 'endpoint-retry', 'account-rotation', 'schema-error', 'generation-finish', 'request-complete', 'request-error', 'request-aborted', 'model-resolved', 'model-unavailable', 'catalog-refresh', 'catalog-updated', 'catalog-error', 'catalog-cache', 'catalog-cache-write-error'])
+const EVENTS = new Set(['request-built', 'adapter-tools', 'request-start', 'http-response', 'network-error', 'endpoint-retry', 'account-rotation', 'schema-error', 'generation-finish', 'request-complete', 'request-error', 'request-aborted', 'model-resolved', 'model-unavailable', 'catalog-refresh', 'catalog-updated', 'catalog-error', 'catalog-cache', 'catalog-cache-write-error'])
 const safeLabel = (value: string, limit: number): string => value.replace(/[^a-zA-Z0-9_./#~\[\]-]/g, '_').slice(0, limit)
 
 export class Diagnostics {
@@ -48,7 +48,7 @@ export class Diagnostics {
     // Construct an allowlisted record; never spread provider objects/errors.
     const entry: DiagnosticEntry = { time: this.now(), event: value.event,
       requestId: safeLabel(value.requestId, 80), model: safeLabel(value.model, 100) }
-    for (const key of ['toolCount', 'deferredToolCount', 'durationMs', 'status', 'attempt', 'modelCount'] as const) {
+    for (const key of ['toolCount', 'deferredToolCount', 'contextWindow', 'maxOutputTokens', 'durationMs', 'status', 'attempt', 'modelCount'] as const) {
       const number = value[key]
       if (typeof number === 'number' && Number.isFinite(number) && number >= 0) entry[key] = Math.floor(number)
     }
@@ -56,6 +56,9 @@ export class Diagnostics {
     if (value.tool) entry.tool = safeLabel(value.tool, 64)
     if (value.schemaPath) entry.schemaPath = safeLabel(value.schemaPath, 240)
     if (value.wireModel) entry.wireModel = safeLabel(value.wireModel, 128)
+    for (const key of ['contextSource', 'outputSource'] as const) {
+      if (value[key] && ['google', 'cache', 'fallback'].includes(value[key])) entry[key] = value[key]
+    }
     if (value.effort && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'default'].includes(value.effort)) entry.effort = value.effort
     if (value.stage && ['authentication', 'request', 'stream', 'generation', 'empty-response'].includes(value.stage)) entry.stage = value.stage
     this.entries.push(entry)

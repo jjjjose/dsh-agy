@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createProvider } from '@earendil-works/pi-ai'
+import { createProvider, normalizeContext } from '@earendil-works/pi-ai'
 import { parseAvailableModels, withLegacyAliases } from '../src/models.ts'
 import { buildEnvelope, createAntiGravityApi } from '../src/api.ts'
 
@@ -21,7 +21,7 @@ vi.mock('@deepseek-ai/dsh-llm-pi-ai', () => ({
     async *streamWithSnapshot(options: any, snapshot: any) {
       dispatch.received(options, snapshot)
       const model = snapshot.get(options.provider).piProvider.getModels().find((model: any) => model.id === options.model)
-      yield buildEnvelope(model, { messages: [], tools: options.tools?.filter((tool: any) => !tool.deferLoading) }, {}, 'test-project')
+      yield buildEnvelope(model, normalizeContext({ messages: [], tools: options.tools?.filter((tool: any) => !tool.deferLoading) }), {}, 'test-project')
     }
   },
 }))
@@ -48,10 +48,10 @@ function toolAdapter(log = vi.fn()) {
 }
 
 describe('Antigravity tool admission', () => {
-  it.each(['direct', 'prepared'])('keeps supplied deferred tools in the wire envelope (%s)', async (entry) => {
+  it.each(['direct', 'prepared'])('keeps admitted tools in the normalized wire envelope (%s)', async (entry) => {
     const { adapter, profiles, log } = toolAdapter()
     const parameters = Object.freeze({ type: 'object', properties: { command: { type: 'string' } }, required: ['command'] })
-    const tool = Object.freeze({ name: 'bash', description: 'Run a command', parameters, deferLoading: true })
+    const tool = Object.freeze({ name: 'bash', description: 'Run a command', parameters })
     const options = Object.freeze({ provider: 'google-antigravity', model: 'gemini-9.2-pro', tools: Object.freeze([tool]) })
     const host = adapter as any
     const stream = entry === 'direct' ? host.stream(options) : (await host.prepareCall()).stream(options)
@@ -60,10 +60,9 @@ describe('Antigravity tool admission', () => {
       { name: 'bash', description: 'Run a command', parameters: { type: 'OBJECT', properties: { command: { type: 'STRING' } }, required: ['command'] } },
     ])
     expect(result.value.request.toolConfig).toBeUndefined()
-    expect(tool.deferLoading).toBe(true)
     expect(dispatch.received.mock.lastCall?.[1]).toBe(profiles)
     expect(dispatch.received.mock.lastCall?.[0].tools[0].parameters).toBe(parameters)
-    expect(log).toHaveBeenCalledWith(expect.objectContaining({ event: 'adapter-tools', toolCount: 1, deferredToolCount: 1 }))
+    expect(log).toHaveBeenCalledWith(expect.objectContaining({ event: 'adapter-tools', toolCount: 1, deferredToolCount: 0 }))
   })
 
   it('does not invent tools or change requests without deferred declarations', async () => {
@@ -80,5 +79,14 @@ describe('Antigravity tool admission', () => {
   it('does not let failed instrumentation interfere with dispatch', async () => {
     const { adapter, profiles } = toolAdapter(() => { throw new Error('diagnostic failure') })
     await expect(adapter.streamWithSnapshot({ provider: 'google-antigravity', model: 'gemini-9.2-pro' }, profiles).next()).resolves.toMatchObject({ done: false })
+  })
+  it('leaves deferred-tool admission to DSH instead of enabling additional tools', async () => {
+    const { adapter, profiles } = toolAdapter()
+    const tool = Object.freeze({ name: 'bash', description: '', parameters: {}, deferLoading: true })
+    const options = Object.freeze({ provider: 'google-antigravity', model: 'gemini-9.2-pro', tools: [tool] })
+    const result = await adapter.streamWithSnapshot(options, profiles).next()
+    expect(result.value.request.tools).toBeUndefined()
+    expect(dispatch.received.mock.lastCall?.[0]).toBe(options)
+    expect(tool.deferLoading).toBe(true)
   })
 })

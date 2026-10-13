@@ -1,5 +1,6 @@
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { DiagnosticRecord } from './diagnostics-format.ts'
+import { scopedStream } from './inference-scope.ts'
 
 /** Keep legacy IDs resolvable internally, but never list them in the picker. */
 export class AntigravityAdapter extends PiAiAdapter {
@@ -7,19 +8,16 @@ export class AntigravityAdapter extends PiAiAdapter {
 
   override streamWithSnapshot(...args: Parameters<PiAiAdapter['streamWithSnapshot']>) {
     const [options, snapshot] = args
+    const requestId = `agent-${crypto.randomUUID()}`
     const tools = options.tools
     const deferredToolCount = tools?.filter((tool) => tool.deferLoading === true).length ?? 0
     try {
-      this.reportLog?.({ requestId: `adapter-${crypto.randomUUID()}`, model: options.model,
+      this.reportLog?.({ requestId, model: options.model,
         event: 'adapter-tools', toolCount: tools?.length ?? 0, deferredToolCount })
     } catch { /* Diagnostics must never affect generation. */ }
-    // This custom protocol offers no incremental tool-loading capability. Send
-    // the supplied request's declarations eagerly, as DSH's no-toolUpdate
-    // projection does. Never fetch extra tools or mutate the frozen request.
-    return super.streamWithSnapshot(deferredToolCount === 0 ? options : {
-      ...options,
-      tools: tools!.map(({ deferLoading: _deferred, ...tool }) => tool),
-    }, snapshot)
+    // Tool admission belongs to DSH. pi-ai 1.x carries the admitted declarations
+    // in transcript system messages; don't change deferred-tool permissions.
+    return scopedStream(requestId, super.streamWithSnapshot(options, snapshot))
   }
 
   override async listModels(provider: string) {

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.2.2 — 2026-10-12
+
+### Corregido
+
+- Compatibilidad con `pi-ai 1.0.2`: recuperar herramientas activas y prompt desde los mensajes de sistema del transcript. El formato anterior leía campos que el host ya había normalizado, enviando cero declaraciones aunque DSH entregase herramientas.
+- Resolver adiciones, eliminaciones, reemplazos y secciones de sistema con las utilidades oficiales de pi-ai. Retirar la promoción de herramientas diferidas: su admisión corresponde a DSH.
+- Leer `maxTokens` de Antigravity como contexto y `maxOutputTokens` como salida. Consulta real: Gemini 3.8 Flash anuncia 1 048 576 de contexto y 65 536 de salida.
+- Conservar límites por ruta/variante y su procedencia. Una variante con metadatos ausentes no rebaja las capacidades conocidas de sus hermanas; los límites desconocidos se identifican como respaldo operativo.
+- Caché v2: invalidar la caché antigua que persistía límites artificiales y preservar datos confirmados solo durante 24 horas desde su verificación original.
+- Agrupar alias de agente con nombres inequívocos de Google y ocultar rutas tiered internas, manteniendo el descubrimiento de versiones sin una lista fija.
+
+### Añadido y validación
+
+- Detalle de contexto, salida y modalidades por variante en la página del plugin. Validación de máximo de salida contra la ruta elegida.
+- Correlación entre `adapter-tools`, `request-start` y `request-built` mediante el mismo requestId, sin cabeceras ni contenido privado.
+- Regresión con la normalización real de `Models.streamSimple` de pi-ai 1.x. Prueba contra Google real con Gemini 3.8 Flash High: llamada válida a herramienta sintética y continuación tras su resultado. No sustituye validar el catálogo completo del agente en DSH Desktop.
+
 ## 0.2.1 — 2026-10-12
 
 ### Corregido

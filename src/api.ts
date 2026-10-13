@@ -8,12 +8,13 @@
  * with the next available account from the pool.
  */
 
-import { calculateCost, createAssistantMessageEventStream } from '@earendil-works/pi-ai'
+import { calculateCost, createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools, normalizeContext } from '@earendil-works/pi-ai'
 import type {
   Api,
   AssistantMessage,
   AssistantMessageEventStream,
   Context as PiContext,
+  TranscriptContext,
   Model,
   ProviderStreams,
   SimpleStreamOptions,
@@ -28,6 +29,7 @@ import type { AntiGravityApi } from './models.ts'
 import { cleanContents, cleanSchema, readSse, responseFailure, SchemaConversionError } from './transport-transform.ts'
 import type { DiagnosticRecord } from './diagnostics-format.ts'
 import { ModelSelectionError, selectedModelEffort, selectModelRoute } from './models.ts'
+import { inferenceScope } from './inference-scope.ts'
 
 /** Per-request auth handed to the transport, including the owning account. */
 export interface RequestAuth {
@@ -62,7 +64,7 @@ interface ResponsePart {
   text?: string
   thought?: boolean
   thoughtSignature?: string
-  functionCall?: { id?: string; name?: string; args?: Record<string, unknown> }
+    functionCall?: { id?: string; name?: string; args?: ToolCall['arguments'] }
 }
 interface ResponseChunk {
   error?: { message?: string; status?: string }
@@ -104,10 +106,15 @@ export function buildEnvelope(
   options: StreamOptions,
   projectId: string,
 ): Record<string, unknown> {
+  // Models.streamSimple normalizes Context into a transcript in pi-ai 1.x.
+  // normalizeContext is also safe for direct callers using the legacy fields.
+  const transcript = normalizeContext(context)
+  const tools = getCurrentTools(transcript.messages)
+  const systemPrompt = getCurrentSystemPrompt(transcript.messages)
   const googleModel = model as unknown as Model<'google-generative-ai'>
-  const history: PiContext = {
-    ...context,
-    messages: context.messages.map((message) => message.role === 'assistant'
+  const history: TranscriptContext = {
+    ...transcript,
+    messages: transcript.messages.map((message) => message.role === 'assistant'
       ? { ...message, content: message.content.filter((part) => part.type !== 'thinking' || (!model.id.startsWith('claude-') && message.model === model.id && message.provider === model.provider)) }
       : message),
   }
@@ -115,8 +122,8 @@ export function buildEnvelope(
     contents: cleanContents(convertMessages(googleModel, history), model.id.startsWith('claude-')),
     ...options.sessionId === undefined ? {} : { sessionId: options.sessionId },
   }
-  if (context.systemPrompt !== undefined) {
-    request.systemInstruction = { role: 'user', parts: [{ text: context.systemPrompt }] }
+  if (systemPrompt) {
+    request.systemInstruction = { role: 'user', parts: [{ text: systemPrompt }] }
   }
   const generationConfig: Record<string, unknown> = {}
   const wire = selectModelRoute(model, (options as SimpleStreamOptions).reasoning)
@@ -126,18 +133,22 @@ export function buildEnvelope(
     const budgets: Record<string, number> = { off: 0, minimal: 1024, low: 8192, medium: 16384, high: 32768, xhigh: 32768, max: 32768 }
     const custom = (options as SimpleStreamOptions).thinkingBudgets
     const budget = reasoning === undefined ? wire.thinking.thinkingBudget : (custom as Record<string, number> | undefined)?.[reasoning] ?? budgets[reasoning] ?? 16384
-    const limited = Math.min(budget, Math.max(0, (options.maxTokens ?? model.maxTokens) - 1))
+    const limited = Math.min(budget, Math.max(0, (options.maxTokens ?? wire.capabilities?.maxOutputTokens.value ?? model.maxTokens) - 1))
     generationConfig.thinkingConfig = { includeThoughts: limited > 0, thinkingBudget: limited }
   }
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
-  if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = options.maxTokens
+  const outputLimit = wire.capabilities?.maxOutputTokens?.value ?? model.maxTokens
+  if (options.maxTokens !== undefined && (!Number.isSafeInteger(options.maxTokens) || options.maxTokens <= 0 || options.maxTokens > outputLimit)) {
+    throw new Error(`Antigravity output token limit must be between 1 and ${outputLimit} for ${wire.id}`)
+  }
+  generationConfig.maxOutputTokens = options.maxTokens ?? outputLimit
   if (Object.keys(generationConfig).length > 0) request.generationConfig = generationConfig
-  if (context.tools !== undefined && context.tools.length > 0) {
+  if (tools.length > 0) {
     // Cloud Code Assist's function declarations use the protobuf Schema field,
     // not the public Gemini API's arbitrary parametersJsonSchema field.
     // Normalize the original schemas: convertTools(..., true) removes $defs
     // before local references can be resolved.
-    request.tools = [{ functionDeclarations: context.tools.map((tool) => {
+    request.tools = [{ functionDeclarations: tools.map((tool) => {
       try {
         return { name: tool.name, description: tool.description, parameters: normalizeToolSchema(tool.parameters, model.id.startsWith('claude-')) }
       } catch (error) {
@@ -200,11 +211,15 @@ async function openResponse(
     }
     const route = selectModelRoute(requestModel, (options as SimpleStreamOptions).reasoning)
     log(provider, { requestId, model: model.id, event: 'model-resolved', wireModel: route.id,
-      effort: selectedModelEffort(requestModel, (options as SimpleStreamOptions).reasoning) })
+      effort: selectedModelEffort(requestModel, (options as SimpleStreamOptions).reasoning),
+      contextWindow: route.capabilities?.contextWindow.value ?? requestModel.contextWindow,
+      maxOutputTokens: route.capabilities?.maxOutputTokens.value ?? requestModel.maxTokens,
+      contextSource: route.capabilities?.contextWindow.source,
+      outputSource: route.capabilities?.maxOutputTokens.source })
     let payload: Record<string, unknown>
     try { payload = buildEnvelope(requestModel, context, options, current.projectId) }
     catch (error) {
-      provider.reportDiagnostic?.({ model: model.id, kind: 'request-conversion-error', toolCount: context.tools?.length ?? 0 })
+      provider.reportDiagnostic?.({ model: model.id, kind: 'request-conversion-error', toolCount: getCurrentTools(normalizeContext(context).messages).length })
       log(provider, { requestId, model: model.id, event: 'schema-error',
         ...error instanceof ToolSchemaError ? { tool: error.tool, schemaPath: error.schemaPath } : {} })
       throw error
@@ -213,6 +228,9 @@ async function openResponse(
     const replacement = await options.onPayload?.(payload, model)
     if (replacement != null) payload = replacement as Record<string, unknown>
     const body = JSON.stringify(payload)
+    const built = payload.request as { tools?: Array<{ functionDeclarations?: unknown[] }> } | undefined
+    const declarationCount = Array.isArray(built?.tools) ? built.tools.reduce((count, tool) => count + (Array.isArray(tool.functionDeclarations) ? tool.functionDeclarations.length : 0), 0) : 0
+    log(provider, { requestId, model: model.id, event: 'request-built', toolCount: declarationCount })
     let failure: Awaited<ReturnType<typeof responseFailure>> | undefined
     for (const endpoint of ENDPOINTS) {
       const headers = {
@@ -288,10 +306,11 @@ export function streamAntiGravity(
   }
   void (async () => {
     let requestAccountId = ''
-    const requestId = `agent-${crypto.randomUUID()}`
+    const requestId = inferenceScope.getStore() ?? `agent-${crypto.randomUUID()}`
     const startedAt = Date.now()
     let stage: DiagnosticRecord['stage'] = 'authentication'
-    log(provider, { requestId, model: model.id, event: 'request-start', toolCount: context.tools?.length ?? 0 })
+    const toolCount = getCurrentTools(normalizeContext(context).messages).length
+    log(provider, { requestId, model: model.id, event: 'request-start', toolCount })
     try {
       const auth = parseRequestAuth(options.apiKey)
       stage = 'request'
@@ -396,7 +415,7 @@ export function streamAntiGravity(
           output.stopReason = mapStopReasonString(candidate.finishReason)
           if (output.stopReason === 'error') {
             stage = 'generation'
-            provider.reportDiagnostic?.({ model: model.id, finishReason, kind: 'generation-finish-error', toolCount: context.tools?.length ?? 0 })
+            provider.reportDiagnostic?.({ model: model.id, finishReason, kind: 'generation-finish-error', toolCount })
             // Expose the backend explanation in the request error, not persistent
             // activity diagnostics: it may contain generated arguments.
             const detail = candidate.finishMessage?.replace(/[\r\n\x00-\x1f]/g, ' ').slice(0, 1000)

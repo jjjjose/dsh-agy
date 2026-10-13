@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import type { ModelThinkingLevel as ThinkingLevel } from '@earendil-works/pi-ai'
-import { discoverModelCatalog, ModelDiscoveryError, ModelSelectionError, parseModelCatalog, selectModelRoute, withLegacyAliases } from './models.ts'
+import { discoverModelCatalog, ModelDiscoveryError, ModelSelectionError, modelLimits, parseModelCatalog, retainModelCapabilities, selectModelRoute, withLegacyAliases } from './models.ts'
 import type { CatalogStatus, DynamicModel } from './models.ts'
 import type { RequestAuth } from './api.ts'
 import type { DiagnosticRecord } from './diagnostics-format.ts'
@@ -71,7 +71,9 @@ export class ModelCatalog {
       modelCount: current?.models.length ?? 0,
       variantCount: current ? current.models.reduce((count, model) => count + Object.keys(model.antigravity.routes).length, 0) : 0,
       ignoredCount: current?.ignoredCount ?? 0, refreshing: this.activeKey ? this.pending.has(this.activeKey) : false,
-      error: this.activeError ?? current?.error }
+      error: this.activeError ?? current?.error,
+      models: (current?.models ?? []).map((model) => ({ id: model.id, name: model.name, ...modelLimits(model),
+        variants: Object.entries(model.antigravity.routes).map(([effort, route]) => ({ effort, id: route.id, capabilities: route.capabilities! })) })) }
   }
 
   failure(): void { this.activeError = 'No se pudo actualizar el catálogo. Comprueba la cuenta y la conexión.'; this.changed() }
@@ -102,10 +104,13 @@ export class ModelCatalog {
     if (!selected) throw new ModelSelectionError(`Antigravity model ${selectedId} is unavailable for this account. Refresh models and select an available model.`)
     const requested = effort ?? selected.antigravity.defaultEffort
     if (!selected.antigravity.routes[requested]) throw new ModelSelectionError(`Antigravity model ${selectedId} does not offer effort ${requested} for this account.`)
-    selectModelRoute(selected, requested)
+    const route = selectModelRoute(selected, requested)
     // Freeze the initially selected default across account rotation. Otherwise a
     // DSH Off (omitted reasoning) could turn into another account's Medium.
-    return { ...selected, antigravity: { ...selected.antigravity, defaultEffort: requested } }
+    return { ...selected, contextWindow: route.capabilities?.contextWindow.value ?? selected.contextWindow,
+      maxTokens: route.capabilities?.maxOutputTokens.value ?? selected.maxTokens,
+      input: route.capabilities?.supportsImages === true ? ['text', 'image'] : ['text'],
+      antigravity: { ...selected.antigravity, defaultEffort: requested } }
   }
 
   async retain(identities: readonly CatalogIdentity[]): Promise<void> {
@@ -129,9 +134,9 @@ export class ModelCatalog {
           const text = await fs.readFile(join(this.directory, `${key}.json`), 'utf8')
           if (text.length > 1_000_000) return
           const stored = JSON.parse(text) as { version?: unknown; updatedAt?: unknown; catalog?: unknown; ignoredCount?: unknown }
-          if (stored.version !== 1 || typeof stored.updatedAt !== 'number' || !Number.isSafeInteger(stored.updatedAt)
+          if (stored.version !== 2 || typeof stored.updatedAt !== 'number' || !Number.isSafeInteger(stored.updatedAt)
             || stored.updatedAt < 0 || stored.updatedAt > this.now() || this.now() - stored.updatedAt > MAX_CACHE_AGE) return
-          const parsed = parseModelCatalog(stored.catalog)
+          const parsed = parseModelCatalog(stored.catalog, 'cache', this.now())
           this.lifetime.signal.throwIfAborted()
           if (this.allowed && !this.allowed.has(key)) return
           this.snapshots.set(key, { ...parsed, ignoredCount: typeof stored.ignoredCount === 'number' && Number.isSafeInteger(stored.ignoredCount) && stored.ignoredCount >= 0 ? stored.ignoredCount : parsed.ignoredCount,
@@ -153,18 +158,23 @@ export class ModelCatalog {
       const discovered = await waitFor((this.options.discover ?? discoverModelCatalog)(auth.token, auth.projectId, signal), signal)
       signal.throwIfAborted()
       if (this.allowed && !this.allowed.has(key)) throw new Error('Antigravity catalog account was removed')
-      const snapshot: Snapshot = { ...discovered, updatedAt: this.now(), source: 'google' }
+      const snapshot: Snapshot = { ...discovered,
+        models: retainModelCapabilities(discovered.models, this.snapshots.get(key)?.models ?? [], this.now()),
+        updatedAt: this.now(), source: 'google' }
       this.snapshots.set(key, snapshot)
       if (key === this.activeKey) this.activeError = undefined
       // Store a reconstructed allowlist, never Google's raw response/quota data.
       const models: Record<string, Record<string, unknown>> = {}
       for (const model of snapshot.models) for (const [effort, route] of Object.entries(model.antigravity.routes)) {
-        const entry = models[route.id] ?? { displayName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxTokens,
-          supportsImages: model.input.includes('image'), supportsThinking: route.thinking !== undefined, supportedThinkingLevels: [] as string[] }
+        const entry = models[route.id] ?? { displayName: model.name, capabilities: route.capabilities,
+          supportsImages: route.capabilities?.supportsImages, supportsVideo: route.capabilities?.supportsVideo,
+          thinkingBudget: route.thinking?.thinkingBudget,
+          supportsThinking: route.thinking !== undefined, supportedThinkingLevels: [] as string[] }
         if (effort !== 'default') (entry.supportedThinkingLevels as string[]).push(effort)
         models[route.id] = entry
       }
-      await this.save(key, { version: 1, updatedAt: snapshot.updatedAt, catalog: { models }, ignoredCount: snapshot.ignoredCount }).catch(() => this.log('catalog-cache-write-error', 0, requestId))
+      const aliases = Object.fromEntries(snapshot.models.map((model) => [model.id, model.antigravity.aliases]))
+      await this.save(key, { version: 2, updatedAt: snapshot.updatedAt, catalog: { models, aliases }, ignoredCount: snapshot.ignoredCount }).catch(() => this.log('catalog-cache-write-error', 0, requestId))
       if (this.allowed && !this.allowed.has(key)) {
         this.snapshots.delete(key)
         await fs.unlink(join(this.directory, `${key}.json`)).catch(() => undefined)

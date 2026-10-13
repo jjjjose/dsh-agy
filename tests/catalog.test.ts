@@ -172,6 +172,49 @@ describe('account-scoped dynamic catalog', () => {
     expect(invalid.status().source).toBe('unavailable')
   })
 
+  it('preserves same-route confirmed limits only until their original verification expires', async () => {
+    let now = 1000
+    const confirmed = parseModelCatalog({ models: { 'gemini-3.8-flash-high': { maxTokens: 1048576, maxOutputTokens: 65536 } } })
+    const missing = parseModelCatalog({ models: { 'gemini-3.8-flash-high': {} } })
+    const discover = vi.fn().mockResolvedValueOnce(confirmed).mockResolvedValue(missing)
+    const { catalog } = await setup({ discover, now: () => now })
+    await catalog.activate(authA)
+    await catalog.get(authA)
+    now += 60000
+    await catalog.get(authA, true)
+    expect(catalog.status().models[0]?.contextWindow).toEqual({ value: 1048576, source: 'cache', verifiedAt: 1000 })
+    const route = await catalog.resolve(authA, 'gemini-3.8-flash', 'high')
+    expect(route).toMatchObject({ contextWindow: 1048576, maxTokens: 65536 })
+    now += 24 * 60 * 60_000
+    await catalog.get(authA, true)
+    expect(catalog.status().models[0]?.contextWindow).toEqual({ value: 32768, source: 'fallback' })
+  })
+
+  it('invalidates cache v1 rather than advertising its synthesized 32k limits', async () => {
+    const { catalog, directory } = await setup({ discover: async () => dataA, now: () => 1000 })
+    await catalog.get(authA)
+    const file = (await fs.readdir(directory))[0]!
+    await fs.writeFile(join(directory, file), JSON.stringify({ version: 1, updatedAt: 1000,
+      catalog: { models: { 'gemini-3.8-flash-high': { contextWindow: 32768, maxOutputTokens: 8192 } } } }))
+    const fresh = new ModelCatalog({ directory, now: () => 1001 })
+    catalogs.push(fresh)
+    await fresh.activate(authA)
+    expect(fresh.models()).toEqual([])
+  })
+
+  it('restores v2 confirmed and unknown limits with their provenance and route-specific values', async () => {
+    const data = parseModelCatalog({ models: { 'gemini-3.8-flash-high': { maxTokens: 1048576, maxOutputTokens: 65536 }, 'gemini-3.8-flash-low': {} } })
+    const { catalog, directory } = await setup({ discover: async () => data, now: () => 1000 })
+    await catalog.get(authA)
+    const fresh = new ModelCatalog({ directory, now: () => 1001 })
+    catalogs.push(fresh)
+    await fresh.activate(authA)
+    expect(fresh.status().models[0]?.contextWindow).toEqual({ value: 1048576, source: 'cache', verifiedAt: 1000 })
+    expect((await fresh.resolve(authA, 'gemini-3.8-flash', 'low')).contextWindow).toBe(32768)
+    expect((await fresh.resolve(authA, 'gemini-3.8-flash', 'high')).contextWindow).toBe(1048576)
+    expect(fresh.status().models[0]?.variants.find((variant) => variant.effort === 'low')?.capabilities.contextWindow.source).toBe('fallback')
+  })
+
   it('cancels one caller without aborting a shared refresh, and disposal aborts discovery', async () => {
     const started = deferred<void>(), pending = deferred<typeof dataA>()
     let signal!: AbortSignal
