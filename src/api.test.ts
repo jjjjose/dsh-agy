@@ -36,14 +36,21 @@ describe('Antigravity transport', () => {
       { role: 'user', parts: [{ functionResponse: { id: 'call', name: 'read', response: { error: expect.any(String) } } }] },
     ])
   })
-  it('recovers a response by name while keeping the original call id', () => {
+  it('does not relabel a result with an unknown ID onto another call', () => {
     const result = cleanContents([
       { role: 'model', parts: [{ functionCall: { id: 'original', name: 'read' } }] },
       { role: 'user', parts: [{ functionResponse: { id: 'compacted', name: 'read', response: {} } }] },
     ], true)
-    expect(result).toMatchObject([{ role: 'model' }, { parts: [{ functionResponse: { id: 'original', name: 'read' } }] }])
+    expect(result).toMatchObject([{ role: 'model' }, { parts: [{ functionResponse: { id: 'original', name: 'read', response: { error: expect.any(String) } } }] }])
   })
-  it('rebuilds project and payload hooks after quota rotation', async () => {
+  it('preserves MAX_TOKENS when a response also includes a tool call', async () => {
+    const frame = { response: { candidates: [{ content: { parts: [{ functionCall: { name: 'subagent', args: { prompt: 'work' } } }] }, finishReason: 'MAX_TOKENS' }] } }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(frame)}\n\n`)))
+    const provider = { reportRateLimit: vi.fn(), reportSuccess: vi.fn(), afterRateLimit: vi.fn() }
+    const result = await streamAntiGravity(model, context, { apiKey: JSON.stringify({ token: 'a', projectId: 'p', accountId: 'a' }) }, provider).result()
+    expect(result.stopReason).toBe('length')
+  })
+  it('returns quota failure to DSH without a hidden second inference attempt', async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(new Response('{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"retryDelay":"3s"}]}}', { status: 429 }))
       .mockResolvedValueOnce(new Response(`data: ${event}\r\n\r\ndata: [DONE]\r\n\r\n`))
     vi.stubGlobal('fetch', fetcher)
@@ -51,13 +58,13 @@ describe('Antigravity transport', () => {
     const onPayload = vi.fn()
     const stream = streamAntiGravity(model, context, { apiKey: JSON.stringify({ token: 'a', projectId: 'first', accountId: 'a' }), onPayload }, provider)
     const result = await stream.result()
-    expect(result.content).toEqual([{ type: 'text', text: 'ok' }])
+    expect(result.stopReason).toBe('error')
+    expect(result.errorMessage).toContain('HTTP 429')
     expect(provider.reportRateLimit).toHaveBeenCalledWith('a', 3000)
-    expect(onPayload).toHaveBeenCalledTimes(2)
-    expect(JSON.parse(fetcher.mock.calls[1]![1].body).project).toBe('second')
+    expect(onPayload).toHaveBeenCalledOnce()
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(provider.afterRateLimit).not.toHaveBeenCalled()
     expect(provider.reportLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'http-response', status: 429, attempt: 1 }))
-    expect(provider.reportLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'account-rotation', attempt: 1 }))
-    expect(provider.reportLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'http-response', status: 200, attempt: 2 }))
   })
 
   it('does not rotate permission-denied accounts', async () => {

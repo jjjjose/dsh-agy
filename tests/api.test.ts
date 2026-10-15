@@ -13,6 +13,23 @@ const tools: Tool[] = [
 afterEach(() => vi.unstubAllGlobals())
 
 describe('parseRequestAuth', () => {
+  it('does not penalize a final 429 as a second general account failure', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 429, headers: { 'retry-after': '1' } })))
+    const auth = { afterRateLimit: vi.fn().mockResolvedValue(undefined), reportRateLimit: vi.fn(), reportSuccess: vi.fn(), reportError: vi.fn() }
+    const message = await streamAntiGravity(model, { messages: [] }, { apiKey: JSON.stringify({ token: 't', projectId: 'p', accountId: 'a' }) }, auth).result()
+    expect(message.stopReason).toBe('error')
+    expect(auth.reportRateLimit).toHaveBeenCalledOnce()
+    expect(auth.reportError).not.toHaveBeenCalled()
+  })
+
+  it('releases managed admission even when request conversion fails', async () => {
+    const release = vi.fn()
+    const auth = { afterRateLimit: vi.fn().mockResolvedValue(undefined), reportRateLimit: vi.fn(), reportSuccess: vi.fn(), acquireRequest: vi.fn().mockResolvedValue({ auth: { token: 't', projectId: 'p', accountId: 'a' }, signal: new AbortController().signal, release }) }
+    const message = await streamAntiGravity(model, { messages: [] }, { maxTokens: -1 }, auth).result()
+    expect(message.stopReason).toBe('error')
+    expect(release).toHaveBeenCalledOnce()
+  })
+
   it('parses a complete request credential', () => {
     const auth = parseRequestAuth(JSON.stringify({ token: 't', projectId: 'p', accountId: 'a' }))
     expect(auth).toEqual({ token: 't', projectId: 'p', accountId: 'a' })
@@ -150,7 +167,7 @@ describe('tool transport', () => {
     expect(JSON.stringify(auth.reportLog.mock.calls)).not.toContain('private-token')
   })
 
-  it('checks the rotated account before sending inference and never downgrades effort', async () => {
+  it('leaves retry admission to the host after a quota response', async () => {
     const selected = parseAvailableModels({ models: { 'gemini-9.2-flash-high': {} } })[0]!
     const incompatible = parseAvailableModels({ models: { 'gemini-9.2-flash-low': {} } })[0]!
     const fetcher = vi.fn().mockResolvedValue(new Response('{"error":{"status":"RESOURCE_EXHAUSTED"}}', { status: 429 }))
@@ -163,8 +180,9 @@ describe('tool transport', () => {
       return current
     })
     const message = await streamAntiGravity(selected, { messages: [] }, { apiKey: JSON.stringify({ token: 'first', accountId: 'a', projectId: 'a' }), reasoning: 'high' }, { ...auth, resolveModel }).result()
-    expect(message.errorMessage).toContain('does not offer effort high')
-    expect(resolveModel).toHaveBeenCalledTimes(2)
+    expect(message.errorMessage).toContain('HTTP 429')
+    expect(resolveModel).toHaveBeenCalledOnce()
+    expect(auth.afterRateLimit).not.toHaveBeenCalled()
     expect(fetcher).toHaveBeenCalledOnce()
   })
 

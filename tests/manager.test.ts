@@ -35,6 +35,40 @@ beforeEach(() => {
 })
 
 describe('AccountManager concurrency and eligibility', () => {
+  it('does not leave quota-limited accounts unhealthy after their retry window', async () => {
+    mocks.load.mockResolvedValue({ accounts: [{ ...account(), accessToken: 'token', accessExpires: Date.now() + 3600000 }] })
+    const { instance } = manager()
+    await instance.init()
+    for (let i = 0; i < 8; i++) instance.reportRateLimit('test-account', 0)
+    expect((await instance.resolveAuth()).accountId).toBe('test-account')
+  })
+
+  it('reserves budget before refresh so concurrent callers use other available accounts', async () => {
+    const accounts = ['a', 'b'].map((id) => ({ ...account(), id }))
+    mocks.load.mockResolvedValue({ accounts, activeId: 'a' })
+    const pending = deferred<{ kind: 'ok'; access: string; expires: number }>()
+    mocks.refresh.mockReturnValue(pending.promise)
+    const { instance } = manager()
+    const requests = Array.from({ length: 60 }, () => instance.resolveAuth())
+    await vi.waitFor(() => expect(mocks.refresh).toHaveBeenCalledTimes(2))
+    pending.resolve({ kind: 'ok', access: 'token', expires: Date.now() + 3600000 })
+    const auth = await Promise.all(requests)
+    expect(auth).toHaveLength(60)
+    expect(new Set(auth.map((a) => a.accountId))).toEqual(new Set(['a', 'b']))
+  })
+
+  it('disposal cancels queued requests and active transport signals', async () => {
+    mocks.load.mockResolvedValue({ accounts: [{ ...account(), accessToken: 'token', accessExpires: Date.now() + 3600000 }] })
+    const { instance } = manager()
+    const model = parseAvailableModels({ models: { 'gemini-4-argon': {} } })[0]!
+    const leases = await Promise.all(Array.from({ length: 4 }, () => instance.acquireRequest(model, {})))
+    const rejected = expect(instance.acquireRequest(model, {})).rejects.toThrow()
+    instance.dispose()
+    await rejected
+    expect(leases.every((lease) => lease.signal.aborted)).toBe(true)
+    leases.forEach((lease) => lease.release())
+  })
+
   it('gets catalog credentials without consuming an inference request budget', async () => {
     const a = { ...account(), accessToken: 'access', accessExpires: Date.now() + 3600000 }
     mocks.load.mockResolvedValue({ accounts: [a], activeId: a.id })

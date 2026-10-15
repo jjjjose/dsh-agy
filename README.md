@@ -22,7 +22,7 @@ Sign in with your Google account and use the models from your **Antigravity Codi
 
 ### Requisitos
 
-- **DeepSeek Harness 0.2.1-alpha.2**, versión objetivo actual de las dependencias del host.
+- **DeepSeek Harness 0.2.1-alpha.2 o una versión superior compatible**. Las dependencias admiten versiones posteriores; el adaptador comprueba la API de snapshots al cargar. Las APIs alpha pueden cambiar: consulta la matriz de validación antes de actualizar.
 - El host debe proporcionar **`@earendil-works/pi-ai` 1.x** (validado con 1.0.2); el transporte consume su formato de transcript, no los campos antiguos de contexto.
 - Cuenta Google con acceso a **Antigravity** e Internet para autorizarla.
 - `pnpm` disponible para el instalador de plugins de DSH. Si el instalador no lo encuentra, instala pnpm siguiendo su documentación y reinicia DSH.
@@ -151,6 +151,8 @@ Más detalles: [tutorial en español](docs/TUTORIAL.es.md), [instalación](docs/
 
 ### Modelos dinámicos y effort
 
+**Gemini 4 Argon:** el parser reconoce IDs versionados y alias Gemini con nombre `Gemini 4 Argon`; conserva la ruta, los esfuerzos y los límites anunciados por Google. La página muestra motivos de exclusión para hasta 100 entradas de la última consulta. Esto no añade modelos que Google no haya devuelto. Según la [documentación oficial](https://antigravity.google/docs/models), Argon requiere Ultra o Enterprise elegible y no está disponible en el antiguo Antigravity IDE. La disponibilidad a través del transporte interno de este plugin debe verificarse con la cuenta; reconocer el catálogo no demuestra acceso a inferencia.
+
 El selector muestra una sola entrada por versión: por ejemplo **Gemini 3.8 Flash**, **Gemini 3.1 Pro**, **Claude Sonnet 4.6** o **GPT-OSS 120B**. No hay una lista cerrada de versiones: se incorporan las nuevas versiones compatibles anunciadas por Google y se retiran las ausentes después de una actualización válida.
 
 Selecciona Low, Medium o High —solo los disponibles— desde **effort** en la conversación. El plugin traduce modelo + effort al ID de inferencia real. En Claude, las rutas de razonamiento utilizan presupuestos de tokens limitados por el máximo de salida. Si existe una ruta Off, es también la predeterminada: DSH representa Off omitiendo `reasoning`. En modelos sin Off se prefiere Medium, después High y luego los demás niveles disponibles. No se sustituye silenciosamente un modelo ni se reduce el effort al rotar cuentas.
@@ -183,6 +185,8 @@ The plugin works with defaults. Advanced options (set in your profile's plugin c
 | `oauthClientConfigRef` | `GOOGLE_ANTIGRAVITY_OAUTH_CLIENT_CONFIG` | Optional override: a JSON `{ clientId, clientSecret }` stored here replaces the embedded Google client. |
 | `displayName` | `Google Antigravity` | Provider display name. |
 | `streamIdleTimeoutMs` | `300000` | Idle timeout for a streaming response. |
+| `maxConcurrentRequests` | `4` | Máximo de generaciones simultáneas por instancia del plugin; las demás esperan en orden FIFO. |
+| `requestQueueTimeoutMs` | `60000` | Máxima espera de admisión, autenticación y presupuesto inicial. Cancelar un subagente retira su espera sin cancelar renovaciones OAuth compartidas. |
 | `maxRequestImageBytes` / `requestImagePixelBudget` / `requestImageMaxBytes` | see defaults | Image request budgets. |
 
 Account tokens are stored only on this device, under `$DSH_HOME/dsh-agy/accounts.json` (default `~/.dsh/dsh-agy/`), with `0600` permissions.

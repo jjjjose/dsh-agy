@@ -13,7 +13,7 @@ export const CATALOG_REFRESH_MS = 15 * 60_000
 const MAX_CACHE_AGE = 24 * 60 * 60_000
 const EMPTY_MODELS: readonly DynamicModel[] = Object.freeze([])
 export interface CatalogIdentity { accountId: string; projectId: string }
-interface Snapshot { models: DynamicModel[]; ignoredCount: number; updatedAt: number; source: 'google' | 'cache'; error?: string }
+interface Snapshot { models: DynamicModel[]; ignoredCount: number; ignored?: Array<{ id: string; reason: string }>; updatedAt: number; source: 'google' | 'cache'; error?: string }
 const keyOf = (identity: CatalogIdentity): string => createHash('sha256').update(JSON.stringify([identity.accountId, identity.projectId])).digest('hex')
 
 function waitFor<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -71,6 +71,7 @@ export class ModelCatalog {
       modelCount: current?.models.length ?? 0,
       variantCount: current ? current.models.reduce((count, model) => count + Object.keys(model.antigravity.routes).length, 0) : 0,
       ignoredCount: current?.ignoredCount ?? 0, refreshing: this.activeKey ? this.pending.has(this.activeKey) : false,
+      ignored: current?.ignored?.map((entry) => ({ ...entry })),
       error: this.activeError ?? current?.error,
       models: (current?.models ?? []).map((model) => ({ id: model.id, name: model.name, ...modelLimits(model),
         variants: Object.entries(model.antigravity.routes).map(([effort, route]) => ({ effort, id: route.id, capabilities: route.capabilities! })) })) }

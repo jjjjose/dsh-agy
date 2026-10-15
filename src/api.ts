@@ -4,8 +4,7 @@
  * Builds the `{project, model, request, requestType, userAgent, requestId}`
  * envelope, POSTs to `v1internal:streamGenerateContent?alt=sse`, and converts
  * the SSE stream into pi-ai assistant events while preserving thought
- * signatures. On a rate-limit response it marks the account and retries once
- * with the next available account from the pool.
+ * signatures. Each stream sends one inference attempt; DSH owns retries.
  */
 
 import { calculateCost, createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools, normalizeContext } from '@earendil-works/pi-ai'
@@ -40,6 +39,7 @@ export interface RequestAuth {
 
 /** Rotation-aware auth source supplied by the account manager. */
 export interface AuthProvider {
+  acquireRequest?(model: Model<AntiGravityApi>, options: StreamOptions): Promise<{ auth: RequestAuth; release: () => void; signal: AbortSignal }>
   /** Next distinct auth after `accountId` was rate-limited, if any. */
   afterRateLimit(accountId: string, model?: Model<AntiGravityApi>, options?: StreamOptions): Promise<RequestAuth | undefined>
   reportRateLimit(accountId: string, delay?: number): void
@@ -185,7 +185,7 @@ function normalizeToolSchema(value: unknown, claude: boolean): Record<string, un
   return schema
 }
 
-/** Open an SSE response, retrying across endpoints and rate-limited accounts. */
+/** Resolve account compatibility before sending one HTTP inference attempt. */
 async function openResponse(
   model: Model<AntiGravityApi>,
   context: PiContext,
@@ -231,8 +231,8 @@ async function openResponse(
     const built = payload.request as { tools?: Array<{ functionDeclarations?: unknown[] }> } | undefined
     const declarationCount = Array.isArray(built?.tools) ? built.tools.reduce((count, tool) => count + (Array.isArray(tool.functionDeclarations) ? tool.functionDeclarations.length : 0), 0) : 0
     log(provider, { requestId, model: model.id, event: 'request-built', toolCount: declarationCount })
-    let failure: Awaited<ReturnType<typeof responseFailure>> | undefined
-    for (const endpoint of ENDPOINTS) {
+    {
+      const endpoint = ENDPOINTS[0]
       const headers = {
         ...Object.fromEntries(Object.entries(options.headers ?? {}).filter((e): e is [string, string] => e[1] !== null)),
         ...antiGravityHeaders(current.token),
@@ -250,8 +250,7 @@ async function openResponse(
       } catch (error) {
         options.signal?.throwIfAborted()
         log(provider, { requestId, model: model.id, event: 'network-error', attempt: attempt + 1 })
-        failure = { message: error instanceof Error ? error.message : String(error), rateLimited: false }
-        continue
+        throw new Error('Antigravity network error', { cause: error })
       }
       log(provider, { requestId, model: model.id, event: 'http-response', status: response.status, attempt: attempt + 1 })
       const headerRecord = Object.fromEntries(response.headers as unknown as Iterable<[string, string]>)
@@ -260,21 +259,13 @@ async function openResponse(
       if (response.ok) {
         return { response, auth: current }
       }
-      failure = await responseFailure(response)
-      if (failure.rateLimited || ![404, 500, 502, 503, 504].includes(response.status)) break
-      log(provider, { requestId, model: model.id, event: 'endpoint-retry', status: response.status, attempt: attempt + 1 })
-    }
-    // Rate-limited or retryable: rotate to the next account if available.
-    if (current.accountId && failure?.rateLimited) {
-      provider.reportRateLimit(current.accountId, failure.delay)
-      const next = await provider.afterRateLimit(current.accountId, model, options)
-      if (next) {
-        log(provider, { requestId, model: model.id, event: 'account-rotation', attempt: attempt + 1 })
-        current = next
-        continue
+      const failure = await responseFailure(response)
+      if (current.accountId && failure.rateLimited) {
+        provider.reportRateLimit(current.accountId, failure.delay)
+        sending('') // Quota is availability, not account health.
       }
+      throw new Error(`Antigravity inference failed${failure.rateLimited ? ' (rate limit)' : ''} with ${failure.message}`)
     }
-    throw new Error(`Antigravity inference failed with ${failure?.message ?? 'unknown error'}`)
   }
   throw new Error('Antigravity inference failed after exhausting retries')
 }
@@ -306,13 +297,18 @@ export function streamAntiGravity(
   }
   void (async () => {
     let requestAccountId = ''
+    let release: (() => void) | undefined
     const requestId = inferenceScope.getStore() ?? `agent-${crypto.randomUUID()}`
     const startedAt = Date.now()
     let stage: DiagnosticRecord['stage'] = 'authentication'
     const toolCount = getCurrentTools(normalizeContext(context).messages).length
     log(provider, { requestId, model: model.id, event: 'request-start', toolCount })
     try {
-      const auth = parseRequestAuth(options.apiKey)
+      const admitted = await provider.acquireRequest?.(model, options)
+      release = admitted?.release
+      if (admitted) options = { ...options, signal: admitted.signal }
+      if (admitted) log(provider, { requestId, model: model.id, event: 'request-admitted', durationMs: Date.now() - startedAt })
+      const auth = admitted?.auth ?? parseRequestAuth(options.apiKey)
       stage = 'request'
       const opened = await openResponse(model, context, options, auth, provider, requestId, (accountId) => { requestAccountId = accountId })
       requestAccountId = opened.auth.accountId
@@ -422,7 +418,7 @@ export function streamAntiGravity(
             throw new Error(`Antigravity generation failed: ${finishReason}${detail ? ` (${detail})` : ''}`)
           }
         }
-        if (output.content.some((block) => block.type === 'toolCall')) output.stopReason = 'toolUse'
+        if (output.stopReason !== 'length' && output.content.some((block) => block.type === 'toolCall')) output.stopReason = 'toolUse'
       }
       for await (const text of readSse(response.body, options.signal)) consume(JSON.parse(text) as ResponseChunk)
       closeCurrent()
@@ -443,7 +439,7 @@ export function streamAntiGravity(
       output.errorMessage = error instanceof Error ? error.message : String(error)
       stream.push({ type: 'error', reason: output.stopReason, error: output })
       stream.end()
-    }
+    } finally { release?.() }
   })()
   return stream
 }

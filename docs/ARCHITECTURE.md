@@ -14,12 +14,12 @@ model picker
    └─> Harness llm service ── AntigravityAdapter / PiAiAdapter (profiles: google-antigravity)
           └─> createProvider(...).stream(model, context, options)
                  └─> createAntiGravityApi(manager).stream(...)
-                         ├─ manager.resolveApiKey()  → rotation + token refresh → RequestAuth JSON
+                         ├─ manager.acquireRequest() → FIFO admission + compatible account + token refresh
                          ├─ catalog.resolve(account, model, effort) → validate the real account's capabilities
                         ├─ buildEnvelope(...)       → { project, model, request, requestType, ... }
                         ├─ POST v1internal:streamGenerateContent?alt=sse
                         ├─ SSE → assistant events (text / thinking / toolCall), signatures kept
-                        └─ on 429 → manager.reportRateLimit + afterRateLimit → retry next account
+                         └─ on 429 → manager.reportRateLimit → terminal error → DSH retry selects an eligible account
 ```
 
 ## Modules
@@ -38,7 +38,7 @@ model picker
 | `model-adapter.ts` | Filters legacy aliases from the picker while retaining internal ID resolution through the host adapter. |
 | `catalog.ts` | Per-account/project discovery, 15-minute freshness, 24-hour sanitized disk fallback, invalidation and route validation. |
 | `catalog-controller.ts` | Startup/periodic/manual/account-change refresh, revision guards and lifecycle cleanup. |
-| `api.ts` | Cloud Code Assist envelope + SSE stream → pi-ai events; rotation-aware retry. |
+| `api.ts` | Cloud Code Assist envelope + SSE stream → pi-ai events; one HTTP inference attempt per call. |
 | `quota.ts` | Fetch/format dual-window quota. |
 | `search.ts` | Grounding-only Google Search, shared by the native tool and RPC. |
 | `tools.ts` | Native DSH tool registration, canonical JSON output and model-visible rendering. |
@@ -54,10 +54,12 @@ model picker
 1. Filter to **enabled** accounts that are not **rate-limited**, not **cooling down**, and healthy enough.
 2. Score by health (2×), token balance (5×), and rest recency (0.1×); the active account keeps a **stickiness** bonus so it only switches when another is clearly better.
 3. Refresh the chosen account's access token if near expiry.
-4. Classify failures before rotating: authorization errors are not automatically quota errors. Rebuild the envelope with the selected account's project on every retry.
+4. Classify failures before rotating: authorization errors are not automatically quota errors. A failed inference returns to DSH; its next attempt selects an eligible account and rebuilds the envelope with that account's project. Inference does not retry HTTP requests or endpoints internally; catalog discovery still has endpoint fallback.
 5. Validate the selected model/effort for the sending account. Skip incompatible alternative accounts without changing the model or effort. Capability mismatch is not a quota penalty.
 
-Health starts at 70, recovers +2/hour, drops on rate limits (−10) and failures (−20), and gates selection below 50. A client-side token bucket smooths bursts.
+Health starts at 70, recovers +2/hour, drops on general failures (−20), and gates selection below 50. Rate limits only set their retry window: simultaneous 429 responses do not reduce health or trigger a second general-error penalty. A client-side token bucket smooths bursts; reservation happens synchronously before token refresh yields.
+
+The transport acquires a FIFO admission slot (default four simultaneous streams per plugin instance), validates account/model/effort eligibility, and authenticates under the caller's cancellation signal. Initial queue/auth/budget wait is bounded by `requestQueueTimeoutMs` (default 60 seconds); active streams retain the host watchdog. Slots release in `finally`, including conversion failures and cancellation. Shared OAuth refresh continues when just one caller cancels. Manager disposal cancels active transport signals and queued requests. The host credential resolver returns a non-secret managed-auth marker; the actual credential is acquired only inside the transport.
 
 ## Dynamic model catalog
 

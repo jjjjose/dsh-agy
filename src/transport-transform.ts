@@ -112,7 +112,15 @@ export function cleanContents(value: unknown, claude: boolean): unknown {
   const interrupted = (): Array<Record<string, unknown>> => pending.splice(0).map((call) => ({
     functionResponse: { ...call.id === undefined ? {} : { id: call.id }, name: call.name, response: { error: 'Tool execution was interrupted before a result was recorded.' } },
   }))
+  // Tool results can arrive as separate user messages. Collect the complete
+  // consecutive result turn before deciding that any call was interrupted.
+  const turns: Array<{ role?: string; parts: Array<Record<string, unknown>> }> = []
   for (const content of value as Array<{ role?: string; parts?: Array<Record<string, unknown>> }>) {
+    const previous = turns.at(-1)
+    if (content.role === 'user' && previous?.role === 'user') previous.parts.push(...content.parts ?? [])
+    else turns.push({ ...content, parts: [...content.parts ?? []] })
+  }
+  for (const content of turns) {
     if (content.role === 'model' && pending.length) contents.push({ role: 'user', parts: interrupted() })
     const parts = (content.parts ?? []).flatMap((original) => {
       const part = { ...original }
@@ -129,7 +137,7 @@ export function cleanContents(value: unknown, claude: boolean): unknown {
       const response = part.functionResponse as { id?: string; name?: string } | undefined
       if (response) {
         let index = response.id ? pending.findIndex((call) => call.id === response.id) : -1
-        if (index < 0 && response.name) index = pending.findIndex((call) => call.name === response.name)
+        if (index < 0 && !response.id && response.name) index = pending.findIndex((call) => call.name === response.name)
         if (index < 0) return []
         const [call] = pending.splice(index, 1)
         part.functionResponse = { ...response, name: call!.name, ...call!.id === undefined ? {} : { id: call!.id } }

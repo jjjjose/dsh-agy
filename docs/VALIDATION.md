@@ -14,6 +14,26 @@ npm run smoke
 
 ## Comprobación Desktop / Web
 
+### Matriz de compatibilidad del adaptador
+
+| Host | Validación |
+| --- | --- |
+| DSH `0.2.1-alpha.2`, pi-ai `1.0.2` | Prueba contra las fuentes reales del adaptador, con HTTP simulado: ocho streams aislados, entrada directa y preparada, orden usage/finish e IDs únicos. |
+| Versiones posteriores | Admitidas por las dependencias, sujetas a la API de snapshots. Ejecutar `test:host` contra cada versión antes de declararla validada. |
+| DSH Desktop/Web + Google + Argon | Requiere validación manual con cuenta elegible; las pruebas del parser no demuestran disponibilidad remota. |
+
+Para probar un checkout de DSH con sus dependencias instaladas, sin los mocks del adaptador:
+
+```sh
+DSH_SOURCE=/ruta/deepseek-harness npm run test:host
+```
+
+La prueba resuelve los módulos del host mediante sus propios paths de TypeScript y usa pi-ai instalado en el plugin. No inicia Desktop ni consume cuota. Las APIs alpha posteriores que hayan cambiado los paths o el adaptador deben investigarse, no declararse compatibles por el número de versión.
+
+### Regresión de subagentes
+
+Probar 1, 2, 4 y 8 hijos con la misma herramienta de delegación, finalizaciones fuera de orden y continuación del padre. Cancelar un hijo en cola y otro transmitiendo: sus hermanos deben terminar. Probar `spawn` y `fork` si están disponibles. El evento `request-admitted` mide la espera inicial (cola, compatibilidad y autenticación). Los escenarios 429, renovación compartida, presupuesto y timeout se reproducen con respuestas simuladas.
+
 1. Instalar la carpeta `dsh-agy` desde **Plugins → Add plugin** y reiniciar DSH.
 2. Abrir **Plugins → Google Antigravity** y comprobar el botón de conexión.
 3. Autorizar Google; comprobar enlace alternativo si el navegador bloquea la apertura.

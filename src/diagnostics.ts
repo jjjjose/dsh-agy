@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { stateDir } from './storage.ts'
 import type { DiagnosticEntry, DiagnosticRecord, DiagnosticSnapshot } from './diagnostics-format.ts'
 
-const EVENTS = new Set(['request-built', 'adapter-tools', 'request-start', 'http-response', 'network-error', 'endpoint-retry', 'account-rotation', 'schema-error', 'generation-finish', 'request-complete', 'request-error', 'request-aborted', 'model-resolved', 'model-unavailable', 'catalog-refresh', 'catalog-updated', 'catalog-error', 'catalog-cache', 'catalog-cache-write-error'])
+const EVENTS = new Set(['request-admitted', 'request-built', 'adapter-tools', 'request-start', 'http-response', 'network-error', 'endpoint-retry', 'account-rotation', 'schema-error', 'generation-finish', 'request-complete', 'request-error', 'request-aborted', 'model-resolved', 'model-unavailable', 'catalog-refresh', 'catalog-updated', 'catalog-error', 'catalog-cache', 'catalog-cache-write-error'])
 const safeLabel = (value: string, limit: number): string => value.replace(/[^a-zA-Z0-9_./#~\[\]-]/g, '_').slice(0, limit)
 
 export class Diagnostics {

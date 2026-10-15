@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Compatibilidad declarada desde DSH `0.2.1-alpha.2`, comprobación de la API de snapshots al cargar y nueva prueba `test:host` contra fuentes reales del host con HTTP simulado.
+- Cola FIFO cancelable de generaciones, concurrencia y espera configurables; autenticación dentro del transporte cancelable y reserva atómica del presupuesto antes de renovar OAuth.
+- Selección inicial por modelo/effort, liberación de admisión al terminar y cancelación de solicitudes activas al descargar el plugin.
+- Los 429 no degradan la salud de la cuenta ni se contabilizan otra vez como errores generales; se respeta su ventana de espera.
+- Un intento HTTP de inferencia por llamada al adaptador; DSH controla los reintentos y la siguiente admisión elige una cuenta disponible. Se elimina la multiplicación de intentos por endpoint/cuenta dentro del transporte.
+- Conservación de resultados paralelos repartidos en mensajes, correspondencia por ID y conservación de la finalización por límite de tokens.
+- Reconocimiento de alias Gemini para Argon y motivos de exclusión en el catálogo. Acceso remoto a Argon pendiente de validación con cuenta elegible.
+
 ## 0.2.2 — 2026-10-12
 
 ### Corregido

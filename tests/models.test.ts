@@ -3,6 +3,18 @@ import { PROVIDER, parseAvailableModels, parseModelCatalog, selectModelRoute, wi
 import { buildEnvelope } from '../src/api.ts'
 
 describe('dynamic model grouping and effort routing', () => {
+  it('discovers Argon and its opaque Gemini aliases while retaining wire IDs and announced limits', () => {
+    const [model] = parseAvailableModels({ models: {
+      'gemini-argon-agent': { displayName: 'Gemini 4 Argon', supportedThinkingLevels: ['low', 'medium', 'high'], maxTokens: 2000000, maxOutputTokens: 1000000 },
+    } })
+    expect(model?.id).toBe('gemini-4-argon')
+    expect(model?.contextWindow).toBe(2000000)
+    expect(selectModelRoute(model!, 'high').id).toBe('gemini-argon-agent')
+    expect(selectModelRoute(model!, 'high').capabilities?.maxOutputTokens.value).toBe(1000000)
+    expect(parseAvailableModels({ models: { 'gemini-4-argon': {} } })[0]?.id).toBe('gemini-4-argon')
+    expect(parseAvailableModels({ models: {} })).toEqual([])
+  })
+
   it('discovers new versions with one entry per model, not per variant', () => {
     const payload = { models: {
       'gemini-9.2-flash-low': { displayName: 'Gemini 9.2 Flash (Low)' },

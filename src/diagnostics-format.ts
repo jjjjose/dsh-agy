@@ -1,5 +1,5 @@
 /** Shared, browser-safe diagnostic types and report formatting. No payloads. */
-export type DiagnosticEvent = 'request-built' | 'adapter-tools' | 'request-start' | 'http-response' | 'network-error' | 'endpoint-retry' | 'account-rotation' | 'schema-error' | 'generation-finish' | 'request-complete' | 'request-error' | 'request-aborted' | 'model-resolved' | 'model-unavailable' | 'catalog-refresh' | 'catalog-updated' | 'catalog-error' | 'catalog-cache' | 'catalog-cache-write-error'
+export type DiagnosticEvent = 'request-admitted' | 'request-built' | 'adapter-tools' | 'request-start' | 'http-response' | 'network-error' | 'endpoint-retry' | 'account-rotation' | 'schema-error' | 'generation-finish' | 'request-complete' | 'request-error' | 'request-aborted' | 'model-resolved' | 'model-unavailable' | 'catalog-refresh' | 'catalog-updated' | 'catalog-error' | 'catalog-cache' | 'catalog-cache-write-error'
 export interface DiagnosticRecord {
   requestId: string
   model: string

@@ -402,6 +402,7 @@ function ModelCatalogPanel(): React.ReactElement {
     <Row title="Modelos disponibles" desc={state ? `${state.modelCount} modelos · ${state.variantCount} variantes · ${state.source === 'google' ? 'Google' : state.source === 'cache' ? 'Caché' : 'Sin catálogo disponible'}${state.updatedAt ? ` · Actualizado: ${new Date(state.updatedAt).toLocaleString()}` : ''}` : 'Consultando catálogo…'} controls={<Button disabled={busy || state?.refreshing} onClick={() => { void refresh() }}>{busy || state?.refreshing ? 'Actualizando…' : 'Actualizar modelos'}</Button>} />
     <p className="agy-note">Una entrada por modelo y versión. Selecciona la variante desde effort en la conversación. Actualización automática cada 15 minutos y al cambiar de cuenta.</p>
     {state?.ignoredCount ? <p className="agy-note">{state.ignoredCount} entradas de Google no publicadas por formato o familia no compatible.</p> : null}
+    {state?.ignored?.length ? <details><summary>Motivos de exclusión (última consulta)</summary><ul>{state.ignored.map((entry, index) => <li key={`${entry.id}-${index}`}>{entry.id}: {entry.reason}</li>)}</ul></details> : null}
     {state?.models?.length ? <details>
       <summary>Contexto, salida y variantes por modelo</summary>
       <p className="agy-note">Google = confirmado por Antigravity. Caché = último dato confirmado. Desconocido = límite operativo de respaldo, no capacidad anunciada. Si las variantes difieren, DSH muestra el menor límite conocido; cada solicitud usa el límite de su ruta.</p>

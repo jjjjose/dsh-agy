@@ -61,6 +61,7 @@ export interface CatalogStatus {
   modelCount: number
   variantCount: number
   ignoredCount: number
+  ignored?: Array<{ id: string; reason: string }>
   refreshing: boolean
   error?: string
   models: Array<{ id: string; name: string; contextWindow: CapabilityLimit; maxOutputTokens: CapabilityLimit;
@@ -159,11 +160,12 @@ function routeFor(id: string, family: Family, effort: ThinkingLevel | 'default',
 }
 
 /** Parse all compatible versions returned by Google, not a fixed allowlist. */
-export function parseModelCatalog(payload: unknown, source: 'google' | 'cache' = 'google', now = Date.now()): { models: DynamicModel[]; ignoredCount: number } {
+export function parseModelCatalog(payload: unknown, source: 'google' | 'cache' = 'google', now = Date.now()): { models: DynamicModel[]; ignoredCount: number; ignored: Array<{ id: string; reason: string }> } {
   if (!record(payload) || !record(payload.models)) throw new Error('Antigravity model response must contain a models object')
   if (Object.keys(payload.models).length > 2000) throw new Error('Antigravity model catalog is too large')
   const groups = new Map<string, DynamicModel>()
   let ignoredCount = 0
+  const ignored: Array<{ id: string; reason: string }> = []
   const hidden = new Set(Array.isArray(payload.tieredModelIds) ? payload.tieredModelIds : [])
   // Sort for deterministic results even when Google's object order changes.
   for (const [id, entry] of Object.entries(payload.models).sort(([a], [b]) => a.localeCompare(b))) {
@@ -171,13 +173,22 @@ export function parseModelCatalog(payload: unknown, source: 'google' | 'cache' =
     // Some agent routes have opaque aliases. Recover a versioned identity only
     // from an unambiguous Google display name; retain the original wire ID.
     if (!info && validId(id) && id.startsWith('gemini-') && record(entry) && typeof entry.displayName === 'string') {
-      const named = /^Gemini (\d+(?:\.\d+)?) (Flash|Pro)(?: \((Low|Medium|High)\))?$/.exec(entry.displayName)
+      const named = /^Gemini (\d+(?:\.\d+)?) (Flash|Pro|Argon)(?: \((Low|Medium|High)\))?$/.exec(entry.displayName)
       if (named) info = { base: `gemini-${named[1]}-${named[2]!.toLowerCase()}`, family: 'gemini', thinking: false,
         effort: named[3]?.toLowerCase() as ThinkingLevel | undefined }
     }
     // The known shared backend route represents both 3.5 Flash effort variants.
     const shared = id === 'gemini-3-flash-agent'
-    if ((!info && !shared) || !record(entry) || entry.isInternal === true || hidden.has(id) || id.endsWith('-tiered')) { ignoredCount++; continue }
+    const reason = !validId(id) || !record(entry) ? 'invalid-format'
+      : entry.isInternal === true ? 'internal'
+      : hidden.has(id) || id.endsWith('-tiered') ? 'tiered'
+      : !info && !shared ? 'unsupported-identity' : undefined
+    if (reason) {
+      ignoredCount++
+      if (ignored.length < 100) ignored.push({ id: validId(id) ? id : '(invalid-id)', reason })
+      continue
+    }
+    if (!record(entry)) continue
     const base = shared ? 'gemini-3.5-flash' : info!.base
     const family = shared ? 'gemini' : info!.family
     let group = groups.get(base)
@@ -236,7 +247,7 @@ export function parseModelCatalog(payload: unknown, source: 'google' | 'cache' =
   const names = new Map<string, number>()
   for (const model of models) names.set(model.name, (names.get(model.name) ?? 0) + 1)
   for (const model of models) if ((names.get(model.name) ?? 0) > 1) model.name = modelName(model.id)
-  return { models, ignoredCount }
+  return { models, ignoredCount, ignored }
 }
 
 export function selectedModelEffort(model: Model<AntiGravityApi>, effort?: ThinkingLevel): ThinkingLevel | 'default' {
@@ -299,7 +310,7 @@ export async function fetchAvailableModels(
   return (await discoverModelCatalog(access, projectId, signal)).models
 }
 
-export async function discoverModelCatalog(access: string, projectId: string, signal?: AbortSignal): Promise<{ models: DynamicModel[]; ignoredCount: number }> {
+export async function discoverModelCatalog(access: string, projectId: string, signal?: AbortSignal): Promise<{ models: DynamicModel[]; ignoredCount: number; ignored?: Array<{ id: string; reason: string }> }> {
   let lastStatus: number | undefined
   for (const endpoint of ENDPOINTS) {
     const response = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {

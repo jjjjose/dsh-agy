@@ -4,7 +4,12 @@ import { scopedStream } from './inference-scope.ts'
 
 /** Keep legacy IDs resolvable internally, but never list them in the picker. */
 export class AntigravityAdapter extends PiAiAdapter {
-  constructor(options: ConstructorParameters<typeof PiAiAdapter>[0], private readonly visibleIds: () => ReadonlySet<string>, private readonly reportLog?: (entry: DiagnosticRecord) => void) { super(options) }
+  constructor(options: ConstructorParameters<typeof PiAiAdapter>[0], private readonly visibleIds: () => ReadonlySet<string>, private readonly reportLog?: (entry: DiagnosticRecord) => void) {
+    super(options)
+    if (typeof PiAiAdapter.prototype.streamWithSnapshot !== 'function' || typeof PiAiAdapter.prototype.listModels !== 'function') {
+      throw new Error('dsh-agy requires the PiAiAdapter snapshot API from DSH 0.2.1-alpha.2 or a compatible newer host. Update DSH and dsh-agy together.')
+    }
+  }
 
   override streamWithSnapshot(...args: Parameters<PiAiAdapter['streamWithSnapshot']>) {
     const [options, snapshot] = args

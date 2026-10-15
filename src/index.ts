@@ -43,6 +43,8 @@ export interface Config {
   oauthClientConfigRef?: string
   displayName?: string
   streamIdleTimeoutMs?: number
+  maxConcurrentRequests?: number
+  requestQueueTimeoutMs?: number
   maxRequestImageBytes?: number
   requestImagePixelBudget?: number
   requestImageMaxBytes?: number
@@ -56,6 +58,8 @@ export const Config = z.object({
   oauthClientConfigRef: z.string().role('credential-ref').default(DEFAULT_OAUTH_CLIENT_CONFIG_REF),
   displayName: z.string().default(DEFAULT_DISPLAY_NAME),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_MS),
+  maxConcurrentRequests: z.number().min(1).default(4),
+  requestQueueTimeoutMs: z.number().min(1).max(2_147_483_647).default(60_000),
   maxRequestImageBytes: z.number().min(1).default(DEFAULT_MAX_IMAGE_BYTES),
   requestImagePixelBudget: z.number().min(1).default(DEFAULT_IMAGE_PIXEL_BUDGET),
   requestImageMaxBytes: z.number().min(1).default(DEFAULT_IMAGE_MAX_BYTES),
@@ -143,6 +147,8 @@ export function apply(ctx: DshContext, rawConfig: Config): void {
     credentials: ctx.credentials,
     credentialRef: credentialRef(config.oauthCredentialEnv),
     clientConfigRef: config.oauthClientConfigRef,
+    maxConcurrentRequests: rawConfig.maxConcurrentRequests,
+    requestQueueTimeoutMs: rawConfig.requestQueueTimeoutMs,
   })
   const stats = new EngineStats()
   const diagnostics = new Diagnostics(updater.status().runningVersion)
@@ -184,7 +190,8 @@ export function apply(ctx: DshContext, rawConfig: Config): void {
   manager.accountsChanged = () => { void catalogController.refresh() }
   const adapter = new AntigravityAdapter({
     profiles: () => profiles,
-    resolveApiKey: () => manager.resolveApiKey(),
+    // Authentication runs inside the cancellable transport, after admission.
+    resolveApiKey: async () => 'dsh-agy-managed-auth',
     auth: { credentials: new InMemoryCredentialStore(), authContext: defaultProviderAuthContext() },
     resolveAttachments: () => ctx.get('attachments'),
   }, () => new Set(catalog.models().map((model) => model.id)), (entry) => diagnostics.record(entry))

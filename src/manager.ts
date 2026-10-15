@@ -19,6 +19,7 @@ import type { AntiGravityApi } from './models.ts'
 import type { DiagnosticRecord } from './diagnostics-format.ts'
 import type { CatalogIdentity } from './catalog.ts'
 import type { Account, LoginId, LoginStatus } from './types.ts'
+import { RequestGate, waitForRequest } from './request-gate.ts'
 
 const RATE_LIMIT_WINDOW_MS = 30 * 60_000
 const COOLDOWN_MS = 60_000
@@ -46,6 +47,8 @@ export interface ManagerOptions {
   clientConfigRef?: string
   /** Maximum wait for a short account cooldown; defaults to 1s, capped at 5s. */
   maxWaitMs?: number
+  maxConcurrentRequests?: number
+  requestQueueTimeoutMs?: number
 }
 
 /** Interaction bridge reused from pi-ai's login contract. */
@@ -67,7 +70,37 @@ export class AccountManager {
   private readonly bucket = new TokenBucket()
   private attempt: LoginAttempt | undefined
 
-  constructor(private readonly options: ManagerOptions) {}
+  private readonly gate: RequestGate
+  constructor(private readonly options: ManagerOptions) {
+    this.gate = new RequestGate(options.maxConcurrentRequests ?? 4)
+    const timeout = options.requestQueueTimeoutMs ?? 60_000
+    if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 2_147_483_647) throw new Error('requestQueueTimeoutMs must be an integer between 1 and 2147483647')
+  }
+
+  /** Hold admission through the entire stream, including account rotation. */
+  async acquireRequest(model: Model<AntiGravityApi>, options: StreamOptions): Promise<{ auth: RequestAuth; release: () => void; signal: AbortSignal }> {
+    const signal = AbortSignal.any([this.lifetime.signal, ...options.signal ? [options.signal] : []])
+    const waiting = AbortSignal.any([signal, AbortSignal.timeout(Math.ceil(this.options.requestQueueTimeoutMs ?? 60_000))])
+    const release = await this.gate.acquire(waiting)
+    try {
+      const excluded = new Set<string>()
+      await this.init()
+      if (this.resolveModel) {
+        for (const account of this.accounts.filter((entry) => entry.enabled)) {
+          try {
+            const auth = await waitForRequest(this.catalogAuth({ accountId: account.id, projectId: account.projectId }), waiting)
+            await this.resolveModel(model, options, auth, waiting)
+          } catch {
+            waiting.throwIfAborted()
+            excluded.add(account.id)
+          }
+        }
+        if (this.accounts.every((entry) => !entry.enabled || excluded.has(entry.id))) throw new Error(`No Antigravity account supports model ${model.id} with the selected effort`)
+      }
+      const auth = await this.resolveAuth(excluded, waiting, true)
+      return { auth, release, signal }
+    } catch (error) { release(); throw error }
+  }
 
   /** Load the pool from disk (idempotent). */
   async init(): Promise<void> {
@@ -248,7 +281,9 @@ export class AccountManager {
   // ---- Auth resolution ----------------------------------------------------
 
   /** Pick the best account, refresh its access token, and return request auth. */
-  async resolveAuth(excludeIds?: ReadonlySet<string>): Promise<RequestAuth> {
+  async resolveAuth(excludeIds?: ReadonlySet<string>, requestSignal?: AbortSignal, waitForBudget = false): Promise<RequestAuth> {
+    const signal = AbortSignal.any([this.lifetime.signal, ...requestSignal ? [requestSignal] : []])
+    signal.throwIfAborted()
     await this.init()
     const now = Date.now()
     const pool = excludeIds ? this.accounts.filter((a) => !excludeIds.has(a.id)) : this.accounts
@@ -263,22 +298,36 @@ export class AccountManager {
       const configuredWait = this.options.maxWaitMs ?? 1000
       const bound = Number.isFinite(configuredWait) ? Math.max(0, Math.min(configuredWait, 5000)) : 1000
       if (wait <= bound) {
-        await delay(wait, undefined, { signal: this.lifetime.signal })
+        await delay(wait, undefined, { signal })
         chosenId = selectAccount({ accounts: pool.filter((a) => this.accounts.includes(a)), activeId: this.activeId, health: this.health, bucket: this.bucket })
       }
     }
-    if (chosenId === undefined) throw new Error('No usable Antigravity account is available right now.')
+    if (chosenId === undefined && waitForBudget && pool.some((a) => a.enabled && this.health.isUsable(a.id) && !isCoolingDown(a) && !isRateLimited(a) && !this.bucket.has(a.id))) {
+      await delay(250, undefined, { signal })
+      return this.resolveAuth(excludeIds, signal, true)
+    }
+    if (chosenId === undefined) throw new Error(pool.some((a) => isRateLimited(a))
+      ? 'No usable Antigravity account is available: rate limit retry window is still active.'
+      : 'No usable Antigravity account is available right now.')
     const account = this.accounts.find((a) => a.id === chosenId)
     if (!account) throw new Error('Antigravity account selection failed.')
 
-    const access = await this.ensureAccess(account)
-    if (!account.enabled || !this.accounts.includes(account) || isRateLimited(account) || isCoolingDown(account) || this.disposed) {
-      throw new Error('Antigravity account is no longer available')
-    }
-    account.lastUsed = Date.now()
+    // Reserve synchronously before any token refresh yields to another caller.
+    signal.throwIfAborted()
     if (!this.bucket.consume(account.id)) throw new Error('Antigravity account request budget was exhausted')
-    await this.persist()
-    return { token: access, projectId: account.projectId, accountId: account.id }
+    account.lastUsed = Date.now()
+    try {
+      const access = await waitForRequest(this.ensureAccess(account), signal)
+      if (!account.enabled || !this.accounts.includes(account) || isRateLimited(account) || isCoolingDown(account) || this.disposed) {
+        throw new Error('Antigravity account is no longer available')
+      }
+      await this.persist()
+      signal.throwIfAborted()
+      return { token: access, projectId: account.projectId, accountId: account.id }
+    } catch (error) {
+      this.bucket.refund(account.id)
+      throw error
+    }
   }
 
   /** Ensure the account has a valid access token, refreshing when expired. */
@@ -333,7 +382,8 @@ export class AccountManager {
       account.rateLimitedUntil = { ...(account.rateLimitedUntil ?? {}), all: Math.max(account.rateLimitedUntil?.all ?? 0, Date.now() + delay) }
       void this.persist().catch(() => { /* Best effort; subsequent operations persist this state. */ })
     }
-    this.health.rateLimited(accountId)
+    // Quota exhaustion is availability, not account health. Concurrent 429s
+    // must not extend an otherwise expired Retry-After through health scoring.
   }
 
   reportSuccess(accountId: string): void {
@@ -368,8 +418,9 @@ export class AccountManager {
       }
     }
     try {
-      return await this.resolveAuth(excluded)
+      return await this.resolveAuth(excluded, options?.signal, true)
     } catch {
+      options?.signal?.throwIfAborted()
       return undefined
     }
   }

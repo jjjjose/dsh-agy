@@ -33,6 +33,14 @@ describe('transport schema normalization', () => {
 })
 
 describe('transport history recovery', () => {
+  it.each([false, true])('preserves split out-of-order subagent results (Claude=%s)', (claude) => {
+    const calls = { role: 'model', parts: ['a', 'b'].map((id) => ({ functionCall: { id, name: 'subagent', args: { prompt: id } } })) }
+    const results = ['b', 'a'].map((id) => ({ functionResponse: { id, name: 'subagent', response: { output: id } } }))
+    const input = [calls, ...results.map((part) => ({ role: 'user', parts: [part] }))]
+    expect(cleanContents(input, claude)).toEqual([calls, { role: 'user', parts: results }])
+    expect(input).toHaveLength(3)
+  })
+
   it('preserves successful and error results without inventing Gemini IDs', () => {
     const contents = [
       { role: 'model', parts: [{ functionCall: { name: 'glob', args: {} }, thoughtSignature: 'c2ln' }, { functionCall: { name: 'read', args: {} } }] },
